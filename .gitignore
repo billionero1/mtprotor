@@ -1,5 +1,2 @@
-.gocache/
-/bin/
-/dist/
-*.log
-.DS_Store
+objs
+dep

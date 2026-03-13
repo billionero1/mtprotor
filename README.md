@@ -1,266 +1,165 @@
-# mtprotor
+# MTProxy
+Simple MT-Proto proxy
 
-Production-minded runtime manager for Telegram MTProxy secrets with **real hot reload** (no daemon restart).
+## Fork extension: hot secret reload (runtime)
+This fork adds runtime user/secret management without process restart.
 
-`mtprotor` keeps secrets in runtime memory, updates them via local API/CLI, and applies changes immediately for new connections while existing active streams continue.
+Added options:
+- `--admin-socket <path>`: enable local Unix-socket admin API.
+- `--secrets-state <path>`: persistent state file for secrets.
+- `--admin-token <token>`: optional token for admin commands.
 
-## What This Project Solves
+Notes:
+- Hot-reload mode is single-process only (`--admin-socket` is not supported with `--slaves`).
+- Existing active client connections are not dropped when secrets are added/removed.
+- Secret state is persisted atomically and restored on next start.
 
-Official `mtproto-proxy` requires restart/reload workflow to apply secret changes. `mtprotor` adds a control layer that provides:
+## Building
+Install dependencies, you would need common set of tools for building from source, and development packages for `openssl` and `zlib`.
 
-- hot add/remove/enable/disable of secrets
-- immediate effect on new connections
-- no restart of the main runtime process
-- preservation of active connections by default
-- persistent state on disk
-- local admin API + CLI
-- systemd/install/uninstall tooling
-
-## Language Choice
-
-Implemented in **Go** for:
-
-- high networking throughput
-- simple and reliable concurrency model
-- single-binary deployment
-- low operational complexity on Ubuntu VPS
-
-## Architecture (MVP)
-
-1. Client connects to `mtprotor` listener.
-2. Runtime reads first 64 bytes of MTProxy handshake and matches against in-memory enabled secrets.
-3. If secret is valid, runtime routes connection to the worker process assigned to that secret.
-4. Worker handles protocol compatibility with Telegram.
-5. Existing active streams continue even if secret set changes.
-
-Worker listeners are bound to loopback (`127.0.0.1`) by default, so only the main public listener is exposed.
-
-Hot updates are done through local Unix-socket API (CLI uses that API).
-
-## Repository Structure
-
-- `cmd/mtprotor` - binary entrypoint
-- `internal/app` - CLI/daemon command wiring
-- `internal/runtime` - core runtime, hot secret store, connection routing
-- `internal/handshake` - secret normalization + MTProxy handshake matching
-- `internal/worker` - per-secret worker lifecycle (command/builtin)
-- `internal/storage` - persistent state (atomic JSON)
-- `internal/api` - local HTTP API over Unix socket
-- `internal/client` - API client for CLI
-- `examples` - dev/prod config examples
-- `systemd` - service unit
-- `scripts` - install/uninstall/wrapper scripts
-- `docs` - architecture notes
-
-## Current Secret Format Support
-
-- 16-byte hex secret (`32` hex chars)
-- `dd` + 16-byte hex
-- `ee` + 16-byte hex (+ optional suffix, e.g. TLS-like client secret form)
-
-Behavior:
-
-- Runtime matching uses the canonical 16-byte key.
-- `dd` form is accepted as real client-compatible secret encoding.
-- `ee...<domain-hex>` form parses the domain suffix and passes it to official worker as `-D <domain>`.
-- You can also set `--tls-domain <domain>` explicitly in CLI/API.
-
-## Build
-
+On Debian/Ubuntu:
 ```bash
-go build -o bin/mtprotor ./cmd/mtprotor
+apt install git curl build-essential libssl-dev zlib1g-dev
+```
+On CentOS/RHEL:
+```bash
+yum install openssl-devel zlib-devel
+yum groupinstall "Development Tools"
 ```
 
-## Quick Start (Local Dev)
-
-1. Start any TCP echo-like upstream on `127.0.0.1:9000` (for local simulation).
-2. Run daemon in builtin mode:
-
+Clone the repo:
 ```bash
-cp examples/config.dev.json /tmp/mtprotor-config.json
-./bin/mtprotor daemon --config /tmp/mtprotor-config.json
+git clone https://github.com/TelegramMessenger/MTProxy
+cd MTProxy
 ```
 
-3. Manage secrets:
+To build, simply run `make`, the binary will be in `objs/bin/mtproto-proxy`:
 
 ```bash
-./bin/mtprotor secret add 00112233445566778899aabbccddeeff --label main --config /tmp/mtprotor-config.json
-./bin/mtprotor secret list --config /tmp/mtprotor-config.json
-./bin/mtprotor status --config /tmp/mtprotor-config.json
+make && cd objs/bin
 ```
 
-## Production Install (Ubuntu 24.04)
+If the build has failed, you should run `make clean` before building it again.
 
-### One-command install from GitHub
-
+## Running
+1. Obtain a secret, used to connect to telegram servers.
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/scripts/install.sh | sudo bash -s -- --repo <org>/<repo>
+curl -s https://core.telegram.org/getProxySecret -o proxy-secret
 ```
-
-Installer behavior:
-
-- in interactive TTY mode, installer asks for:
-  - public listen port
-  - worker local port range
-  - whether to install official `mtproto-proxy`
-- in non-interactive mode, defaults are used unless explicit flags are passed
-
-Optional flags:
-
-- `--ref <branch-or-tag>`
-- `--skip-official` (skip installing official `mtproto-proxy` worker)
-- `--non-interactive`
-- `--listen-port <port>`
-- `--worker-port-start <port>`
-- `--worker-port-end <port>`
-- `--force-config`
-
-Installer performs:
-
-- builds and installs `mtprotor`
-- installs systemd unit
-- creates `mtprotor` system user
-- writes default config `/etc/mtprotor/config.json`
-- installs worker wrapper `/usr/local/bin/mtproto-worker-wrapper.sh`
-- installs official Telegram `mtproto-proxy` and proxy config files (unless `--skip-official`)
-
-Detailed VPS rollout checklist: `docs/rollout.md`.
-
-## Service Management
-
+2. Obtain current telegram configuration. It can change (occasionally), so we encourage you to update it once per day.
 ```bash
-sudo systemctl status mtprotor --no-pager
-sudo systemctl restart mtprotor
-sudo journalctl -u mtprotor -f
+curl -s https://core.telegram.org/getProxyConfig -o proxy-multi.conf
 ```
-
-## CLI
-
+3. Generate a secret to be used by users to connect to your proxy.
 ```bash
-mtprotor status
-mtprotor secret list
-mtprotor secret add <secret_hex> --label main
-mtprotor secret add <secret_hex> --tls-domain example.com
-mtprotor secret remove <secret_id>
-mtprotor secret disable <secret_id>
-mtprotor secret enable <secret_id>
+head -c 16 /dev/urandom | xxd -ps
 ```
+4. Run `mtproto-proxy`:
+```bash
+./mtproto-proxy -u nobody -p 8888 -H 443 -S <secret> --aes-pwd proxy-secret proxy-multi.conf -M 1
+```
+... where:
+- `nobody` is the username. `mtproto-proxy` calls `setuid()` to drop privileges.
+- `443` is the port, used by clients to connect to the proxy.
+- `8888` is the local port. You can use it to get statistics from `mtproto-proxy`. Like `wget localhost:8888/stats`. You can only get this stat via loopback.
+- `<secret>` is the secret generated at step 3. Also you can set multiple secrets: `-S <secret1> -S <secret2>`.
+- `proxy-secret` and `proxy-multi.conf` are obtained at steps 1 and 2.
+- `1` is the number of workers. You can increase the number of workers, if you have a powerful server.
 
-Extra options for add:
+Also feel free to check out other options using `mtproto-proxy --help`.
 
-- `--expires-at 2026-12-31T00:00:00Z`
-- `--max-connections 100`
-- `--disabled`
-- `--tls-domain example.com`
-
-## Local Admin API
-
-Unix socket: `/run/mtprotor/admin.sock`
-
-Endpoints:
-
-- `GET /v1/status`
-- `GET /v1/secrets`
-- `POST /v1/secrets`
-- `DELETE /v1/secrets/{id}`
-- `PATCH /v1/secrets/{id}/enable`
-- `PATCH /v1/secrets/{id}/disable`
-
+### Running with hot reload
 Example:
-
 ```bash
-curl --unix-socket /run/mtprotor/admin.sock http://localhost/v1/secrets
+./mtproto-proxy \
+  -u nobody \
+  -p 8888 \
+  -H 443 \
+  -S <bootstrap-secret> \
+  --aes-pwd proxy-secret \
+  --admin-socket /run/mtproxy/admin.sock \
+  --secrets-state /var/lib/mtproxy/secrets.tsv \
+  proxy-multi.conf
 ```
 
-Create secret:
+Admin protocol is line-based over Unix socket:
+- `STATUS`
+- `LIST`
+- `ADD secret=<hex32> label=<label> expires=<unix_ts_or_0> enabled=<0|1>`
+- `REMOVE secret=<hex32>`
+- `ENABLE secret=<hex32>`
+- `DISABLE secret=<hex32>`
 
+If `--admin-token` is configured, include `token=<token>` in command arguments.
+
+Examples:
 ```bash
-curl --unix-socket /run/mtprotor/admin.sock \
-  -H 'Content-Type: application/json' \
-  -d '{"secret":"ee00112233445566778899aabbccddeeff6578616d706c652e636f6d","label":"main","enabled":true}' \
-  http://localhost/v1/secrets
+python3 - <<'PY'
+import socket
+sock="/run/mtproxy/admin.sock"
+for cmd in [
+  "STATUS",
+  "ADD secret=11111111111111111111111111111111 label=user42 enabled=1 expires=0",
+  "LIST",
+  "DISABLE secret=11111111111111111111111111111111",
+]:
+  s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+  s.connect(sock)
+  s.sendall((cmd+"\\n").encode())
+  print(s.recv(65535).decode(), end="")
+  s.close()
+PY
 ```
 
-## Config
+5. Generate the link with following schema: `tg://proxy?server=SERVER_NAME&port=PORT&secret=SECRET` (or let the official bot generate it for you).
+6. Register your proxy with [@MTProxybot](https://t.me/MTProxybot) on Telegram.
+7. Set received tag with arguments: `-P <proxy tag>`
+8. Enjoy.
 
-Main file: `/etc/mtprotor/config.json`
+## Random padding
+Due to some ISPs detecting MTProxy by packet sizes, random padding is
+added to packets if such mode is enabled.
 
-Use `examples/config.production.json` as baseline.
+It's only enabled for clients which request it.
 
-Important fields:
+Add `dd` prefix to secret (`cafe...babe` => `ddcafe...babe`) to enable
+this mode on client side.
 
-- `listen_addr` - public ingress for clients
-- `admin_socket` - Unix socket for local management
-- `state_file` - persistent secret state
-- `worker.mode`:
-  - `command` for official worker process
-  - `builtin` for testing/dev
-
-`command` mode uses placeholders in args:
-
-- `{{port}}` - assigned local worker port
-- `{{secret}}` - normalized secret
-- `{{id}}` - secret ID
-- `{{tls_domain}}` - normalized tls domain for `ee` transport (may be empty)
-
-When using official worker wrapper (`/usr/local/bin/mtproto-worker-wrapper.sh`):
-
-- set `MTPROXY_BASE_ARGS` in `/etc/default/mtprotor` with shared params (default: `--aes-pwd /etc/mtprotor/proxy-secret`)
-- do not include `-p/-H/-S` in `MTPROXY_BASE_ARGS` (wrapper injects them per secret worker)
-- set `MTPROXY_CONFIG_FILE=/etc/mtprotor/proxy-multi.conf` for binaries that expect config as positional argument
-- optional `MTPROXY_PLAIN_PORT_OFFSET` controls derived plain port (`-p`)
-- optional `MTPROXY_BIND_ADDR` controls worker bind address (default `127.0.0.1`)
-- example env file: `examples/mtprotor.env`
-
-## Uninstall
-
+## Systemd example configuration
+1. Create systemd service file (it's standard path for the most Linux distros, but you should check it before):
 ```bash
-sudo /usr/local/bin/mtprotor-uninstall
+nano /etc/systemd/system/MTProxy.service
+```
+2. Edit this basic service (especially paths and params):
+```bash
+[Unit]
+Description=MTProxy
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/MTProxy
+ExecStart=/opt/MTProxy/mtproto-proxy -u nobody -p 8888 -H 443 -S <secret> -P <proxy tag> <other params>
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+3. Reload daemons:
+```bash
+systemctl daemon-reload
+```
+4. Test fresh MTProxy service:
+```bash
+systemctl restart MTProxy.service
+# Check status, it should be active
+systemctl status MTProxy.service
+```
+5. Enable it, to autostart service after reboot:
+```bash
+systemctl enable MTProxy.service
 ```
 
-Purge config/state too:
-
-```bash
-sudo /usr/local/bin/mtprotor-uninstall --purge-data
-```
-
-## Testing
-
-```bash
-go test ./...
-```
-
-Quick operational smoke check on server:
-
-```bash
-sudo /usr/local/bin/mtprotor-smoke
-# or from repo checkout:
-./scripts/smoke-hot-reload.sh
-```
-
-Included tests:
-
-- unit tests for secret normalization and handshake matching
-- unit tests for state persistence
-- integration tests for:
-  - hot add with multiple secrets (existing connection survives)
-  - hot remove behavior (active connection survives)
-  - restart + state restore
-
-## CI/CD
-
-Included GitHub Actions workflows:
-
-- `.github/workflows/ci.yml` - format check, test, vet, build
-- `.github/workflows/release.yml` - build Linux binaries on tag `v*` and publish release assets
-
-## Operational Notes
-
-- Secret remove/disable blocks new connections immediately.
-- Existing connections are preserved by default (`drop_on_disable=false`).
-- API returns masked secret values (full secret not exposed in list output).
-- Worker scale model: one worker process per active secret (not per client connection).
-
-## License
-
-MIT (recommended for this project; add `LICENSE` file before publishing).
+## Docker image
+Telegram is also providing [official Docker image](https://hub.docker.com/r/telegrammessenger/proxy/).
+Note: the image is outdated.
