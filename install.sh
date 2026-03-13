@@ -251,12 +251,21 @@ prompt_port STATS_PORT "Local stats port" "$STATS_PORT"
 prompt_default PUBLIC_HOST "Public host/IP for generated links" "${PUBLIC_HOST:-0.0.0.0}"
 prompt_hex32 BOOTSTRAP_SECRET "Bootstrap secret (32 hex)" "$BOOTSTRAP_SECRET"
 prompt_nonempty ADMIN_TOKEN "Admin API token" "$ADMIN_TOKEN"
-prompt_default SECRET_PREFIX "Default link secret prefix (dd/plain)" "$SECRET_PREFIX"
-if [[ "${SECRET_PREFIX,,}" == "plain" ]]; then
-  SECRET_PREFIX=""
-else
-  SECRET_PREFIX="dd"
-fi
+prompt_default SECRET_PREFIX "Default link secret prefix (plain/dd/ee)" "$SECRET_PREFIX"
+case "${SECRET_PREFIX,,}" in
+  plain|"")
+    SECRET_PREFIX="plain"
+    ;;
+  dd)
+    SECRET_PREFIX="dd"
+    ;;
+  ee)
+    SECRET_PREFIX="ee"
+    ;;
+  *)
+    die "secret prefix must be plain, dd or ee"
+    ;;
+esac
 prompt_yes_no CLEAN_OLD "Delete old mtproxy/mtprotor installations first" "yes"
 prompt_yes_no REFRESH_TG_CONFIG "Refresh Telegram proxy-secret/proxy-multi.conf" "yes"
 prompt_yes_no BOT_SSH_SETUP "Configure SSH bot credentials (login/password) now" "yes"
@@ -412,7 +421,17 @@ if ! ss -ltn | awk '{print $4}' | grep -qE "(^|:)${CLIENT_PORT}$"; then
 fi
 
 if [[ -n "$SECRET_PREFIX" ]]; then
-  LINK_SECRET="${SECRET_PREFIX}${BOOTSTRAP_SECRET,,}"
+  case "${SECRET_PREFIX,,}" in
+    plain)
+      LINK_SECRET="${BOOTSTRAP_SECRET,,}"
+      ;;
+    dd|ee)
+      LINK_SECRET="${SECRET_PREFIX,,}${BOOTSTRAP_SECRET,,}"
+      ;;
+    *)
+      LINK_SECRET="${BOOTSTRAP_SECRET,,}"
+      ;;
+  esac
 else
   LINK_SECRET="${BOOTSTRAP_SECRET,,}"
 fi

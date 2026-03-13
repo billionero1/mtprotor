@@ -134,6 +134,7 @@ Menu includes:
 - change client port
 - change bootstrap secret
 - change public host
+- change stealth mode (`plain/dd/ee`)
 - restart service
 - bot SSH settings (change login/password/allow-from)
 - force run expired-user disable
@@ -153,7 +154,9 @@ proxyctl config set stats-port 8888
 proxyctl config set public-host 1.2.3.4
 proxyctl config set bootstrap-secret <hex32>
 proxyctl config set admin-token <token>
-proxyctl config set secret-prefix dd
+proxyctl config set secret-prefix ee
+# alias:
+proxyctl config set stealth-mode plain
 ```
 
 Notes:

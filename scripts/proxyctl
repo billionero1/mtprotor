@@ -16,11 +16,16 @@ load_env() {
   : "${STATS_PORT:=8888}"
   : "${PUBLIC_HOST:=}"
   : "${BOOTSTRAP_SECRET:=}"
-  : "${SECRET_PREFIX:=dd}"
   : "${ADMIN_SOCKET:=/var/lib/mtproxy-fork/admin.sock}"
   : "${STATE_FILE:=/var/lib/mtproxy-fork/secrets.tsv}"
   : "${ADMIN_TOKEN:=}"
   : "${ADMIN_TOKEN_FILE:=/etc/mtproxy-fork/admin.token}"
+  if [[ -z "${SECRET_PREFIX+x}" ]]; then
+    SECRET_PREFIX="dd"
+  elif [[ -z "$SECRET_PREFIX" ]]; then
+    # Backward compatibility: old configs used empty for plain.
+    SECRET_PREFIX="plain"
+  fi
 }
 
 load_env
@@ -79,7 +84,7 @@ usage() {
 Usage:
   proxyctl status
   proxyctl health
-  proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd]
+  proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd|--ee]
 
   proxyctl runtime status [--full|--json]
   proxyctl runtime start|stop|restart|logs|logs-live
@@ -91,7 +96,8 @@ Usage:
   proxyctl config set public-host <host_or_ip>
   proxyctl config set bootstrap-secret <hex32>
   proxyctl config set admin-token <token>
-  proxyctl config set secret-prefix <dd|plain>
+  proxyctl config set secret-prefix <plain|dd|ee>
+  proxyctl config set stealth-mode <plain|dd|ee>
 
   proxyctl secret list [--table]
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
@@ -383,6 +389,26 @@ link_secret() {
   esac
 }
 
+stealth_mode_name() {
+  local pref="${1:-$SECRET_PREFIX}"
+  case "${pref,,}" in
+    ""|plain) echo "plain" ;;
+    dd) echo "dd" ;;
+    ee) echo "ee" ;;
+    *) echo "${pref,,}" ;;
+  esac
+}
+
+normalize_secret_prefix() {
+  local in="${1:-}"
+  case "${in,,}" in
+    plain|"") echo "plain" ;;
+    dd) echo "dd" ;;
+    ee) echo "ee" ;;
+    *) return 1 ;;
+  esac
+}
+
 show_links() {
   local sec="$1"
   local host="${2:-$PUBLIC_HOST}"
@@ -520,6 +546,7 @@ STATS_PORT=$STATS_PORT
 PUBLIC_HOST=$PUBLIC_HOST
 BOOTSTRAP_SECRET=$BOOTSTRAP_SECRET
 SECRET_PREFIX=$SECRET_PREFIX
+STEALTH_MODE=$(stealth_mode_name)
 ADMIN_SOCKET=$ADMIN_SOCKET
 STATE_FILE=$STATE_FILE
 ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
@@ -589,22 +616,13 @@ cmd_config_set() {
       echo "bootstrap-secret updated"
       cmd_link
       ;;
-    secret-prefix)
-      case "${val,,}" in
-        dd|plain)
-          ;;
-        *)
-          die "secret-prefix must be dd or plain"
-          ;;
-      esac
-      if [[ "${val,,}" == "plain" ]]; then
-        val=""
-      else
-        val="dd"
+    secret-prefix|stealth-mode)
+      if ! val="$(normalize_secret_prefix "$val")"; then
+        die "secret-prefix must be plain, dd or ee"
       fi
       update_env_key SECRET_PREFIX "$val"
       SECRET_PREFIX="$val"
-      echo "secret-prefix updated"
+      echo "secret-prefix updated (mode: $(stealth_mode_name "$val"))"
       cmd_link
       ;;
     *)
@@ -931,13 +949,16 @@ run_safe() {
 
 menu_header() {
   local snap active substate pid start_ts mem cpu listen host total active_secrets
+  local stealth
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
+  stealth="$(stealth_mode_name)"
   echo
   echo "=========== $(paint "$C_BOLD" "$BRAND_CONSOLE") ==========="
   echo "Runtime   : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
   echo "Node      : $BRAND_RUNTIME_ID  PID: $(paint "$C_CYAN" "$pid")"
   echo "Endpoint  : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
+  echo "Stealth   : $(paint "$C_CYAN" "$stealth")"
   echo "Users     : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
   echo "Started   : $start_ts (UTC)"
   echo "=================================================="
@@ -1045,17 +1066,18 @@ menu_cmd() {
     echo "8) Change client port (restart)"
     echo "9) Rotate bootstrap secret"
     echo "10) Change public host"
+    echo "11) Change stealth mode (plain/dd/ee)"
     echo
     echo "[Users / Subscriptions]"
-    echo "11) List users (table)"
-    echo "12) Issue user access (secret + link)"
-    echo "13) Suspend user access"
-    echo "14) Resume user access"
-    echo "15) Revoke user access"
-    echo "16) Sync expired users -> disabled"
+    echo "12) List users (table)"
+    echo "13) Issue user access (secret + link)"
+    echo "14) Suspend user access"
+    echo "15) Resume user access"
+    echo "16) Revoke user access"
+    echo "17) Sync expired users -> disabled"
     echo
     echo "[Bot Integration]"
-    echo "17) Bot SSH settings (login/password/allow-from)"
+    echo "18) Bot SSH settings (login/password/allow-from)"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
@@ -1098,9 +1120,14 @@ menu_cmd() {
         [[ -n "$newhost" ]] && run_safe cmd_config_set public-host "$newhost"
         ;;
       11)
-        run_safe cmd_secret list --table
+        printf "Stealth mode (plain/dd/ee): "
+        IFS= read -r mode || true
+        [[ -n "$mode" ]] && run_safe cmd_config_set stealth-mode "$mode"
         ;;
       12)
+        run_safe cmd_secret list --table
+        ;;
+      13)
         printf "Label: "
         IFS= read -r label || true
         [[ -n "$label" ]] || { warn "label is required"; continue; }
@@ -1112,25 +1139,25 @@ menu_cmd() {
           run_safe cmd_secret issue "$label"
         fi
         ;;
-      13)
+      14)
         printf "Secret to suspend: "
         IFS= read -r secd || true
         [[ -n "$secd" ]] && run_safe cmd_secret disable "$secd"
         ;;
-      14)
+      15)
         printf "Secret to resume: "
         IFS= read -r sece || true
         [[ -n "$sece" ]] && run_safe cmd_secret enable "$sece"
         ;;
-      15)
+      16)
         printf "Secret to revoke/remove: "
         IFS= read -r secr || true
         [[ -n "$secr" ]] && run_safe cmd_secret remove "$secr"
         ;;
-      16)
+      17)
         run_safe cmd_secret expire-disable
         ;;
-      17)
+      18)
         run_safe menu_bot_settings
         ;;
       0)
