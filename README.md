@@ -1,245 +1,198 @@
-# MTProxy
-Simple MT-Proto proxy
+# Bulldog MTProxy Fork
+Production-focused MTProxy fork with **runtime hot reload of secrets/users** (no process restart required for add/remove/enable/disable).
 
-## Fork extension: hot secret reload (runtime)
-This fork adds runtime user/secret management without process restart.
+## What This Fork Adds
+- Runtime secret store in proxy process memory.
+- Hot operations without service restart:
+  - add secret
+  - remove secret
+  - enable/disable secret
+- Existing active connections are not dropped during secret updates.
+- Persistent state on disk (`secrets.tsv`) with restore on service start.
+- Local admin API over Unix socket (HTTP/JSON + legacy line protocol).
+- `proxyctl` CLI and interactive terminal menu.
+- One-command installer for Ubuntu 24.04.
 
-Added options:
-- `--admin-socket <path>`: enable local Unix-socket admin API.
-- `--secrets-state <path>`: persistent state file for secrets.
-- `--admin-token <token>`: optional token for admin commands.
+## Important Operational Notes
+- Hot reload is currently **single-process mode only**.
+- `--admin-socket` is intentionally blocked together with `--slaves` to avoid secret desync between worker processes.
+- This does **not** mean one secret only. You can manage many secrets/users in one process.
 
-Notes:
-- Hot-reload mode is currently single-process only (`--admin-socket` is not supported with `--slaves`), because each slave process has its own memory and secret store would desync.
-- Existing active client connections are not dropped when secrets are added/removed.
-- Secret state is persisted atomically and restored on next start.
-- Admin API is available over Unix socket in HTTP/JSON format (plus legacy line protocol).
-
-## One-command install (Ubuntu 24.04)
-Interactive installer (asks port/secret/token and removes old stack first):
+## Quick Install (Ubuntu 24.04)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/install.sh | sudo bash
 ```
 
-In non-interactive mode it uses defaults and performs clean reinstall (`CLEAN_OLD=yes`).
+Installer does:
+1. optional full cleanup of old stacks
+2. dependency install
+3. clone + build fork
+4. runtime user/dirs setup
+5. Telegram config download (`proxy-secret`, `proxy-multi.conf`)
+6. bootstrap secret + admin token setup
+7. systemd install and start
+8. health checks + ready links
 
-For Telegram iOS "Paste from clipboard", prefer:
+After install:
+- service: `mtproxy-fork.service`
+- binary: `/usr/local/bin/mtproto-proxy-fork`
+- CLI: `/usr/local/bin/proxyctl`
+- menu: `/usr/local/bin/mtproxymenu`
+- env/config: `/etc/default/mtproxy-fork`
+- secrets state: `/var/lib/mtproxy-fork/secrets.tsv`
+
+## Telegram Link Format (iOS)
+For iOS clipboard import, use:
 ```text
-https://t.me/proxy?server=<IP>&port=<PORT>&secret=dd<SECRET32>
+https://t.me/proxy?server=<IP_OR_HOST>&port=<PORT>&secret=dd<SECRET32>
 ```
-`tg://proxy?...` is kept as optional deep-link format.
+`tg://proxy?...` is also printed, but `https://t.me/proxy?...` is more reliable for paste flow.
 
-Uninstall:
+## Uninstall
 ```bash
 curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/uninstall.sh | sudo bash
 ```
 
-Optional uninstall flags:
-- `--purge-data` removes `/etc/mtproxy-fork`, `/var/lib/mtproxy-fork`, `/etc/default/mtproxy-fork`.
-- `--purge-source` removes `/opt/mtproxy-fork-src`.
+Optional flags:
+- `--purge-data`
+- `--purge-source`
 
-After install:
-- service name: `mtproxy-fork.service`
-- binary: `/usr/local/bin/mtproto-proxy-fork`
-- local CLI: `/usr/local/bin/proxyctl`
+## Day-1 Operations
 
-## Building
-Install dependencies, you would need common set of tools for building from source, and development packages for `openssl` and `zlib`.
-
-On Debian/Ubuntu:
+### Service
 ```bash
-apt install git curl build-essential libssl-dev zlib1g-dev
+proxyctl service status
+proxyctl service restart
+proxyctl service logs
+proxyctl health
 ```
-On CentOS/RHEL:
+
+### Links
 ```bash
-yum install openssl-devel zlib-devel
-yum groupinstall "Development Tools"
+proxyctl link
+proxyctl link --plain
+proxyctl link --secret <hex32>
 ```
 
-Clone the repo:
+### Secrets (users)
 ```bash
-git clone https://github.com/TelegramMessenger/MTProxy
-cd MTProxy
+proxyctl secret list
+proxyctl secret add <secret_hex_or_dd_or_ee> --label user123
+proxyctl secret disable <secret_hex>
+proxyctl secret enable <secret_hex>
+proxyctl secret remove <secret_hex>
 ```
 
-To build, simply run `make`, the binary will be in `objs/bin/mtproto-proxy`:
-
+### Auto issue user secret
 ```bash
-make && cd objs/bin
+proxyctl secret issue user123
+proxyctl secret issue user123 --days 30
 ```
 
-If the build has failed, you should run `make clean` before building it again.
+This prints JSON with generated secret and ready `https://t.me/proxy?...` link.
 
-## Running
-1. Obtain a secret, used to connect to telegram servers.
+## Interactive Terminal Menu
 ```bash
-curl -s https://core.telegram.org/getProxySecret -o proxy-secret
+mtproxymenu
+# or
+proxyctl menu
 ```
-2. Obtain current telegram configuration. It can change (occasionally), so we encourage you to update it once per day.
+
+Menu includes:
+- service status/health/logs
+- default links
+- list users
+- issue/disable/enable/remove user
+- change client port
+- change bootstrap secret
+- change public host
+- restart service
+
+When link-related params change, default links are reprinted.
+
+## Config Management (`/etc/default/mtproxy-fork`)
+Show current runtime config:
 ```bash
-curl -s https://core.telegram.org/getProxyConfig -o proxy-multi.conf
+proxyctl config show
 ```
-3. Generate a secret to be used by users to connect to your proxy.
+
+Update config:
 ```bash
-head -c 16 /dev/urandom | xxd -ps
-```
-4. Run `mtproto-proxy`:
-```bash
-./mtproto-proxy -u nobody -p 8888 -H 443 -S <secret> --aes-pwd proxy-secret proxy-multi.conf -M 1
-```
-... where:
-- `nobody` is the username. `mtproto-proxy` calls `setuid()` to drop privileges.
-- `443` is the port, used by clients to connect to the proxy.
-- `8888` is the local port. You can use it to get statistics from `mtproto-proxy`. Like `wget localhost:8888/stats`. You can only get this stat via loopback.
-- `<secret>` is the secret generated at step 3. Also you can set multiple secrets: `-S <secret1> -S <secret2>`.
-- `proxy-secret` and `proxy-multi.conf` are obtained at steps 1 and 2.
-- `1` is the number of workers. You can increase the number of workers, if you have a powerful server.
-
-Also feel free to check out other options using `mtproto-proxy --help`.
-
-### Running with hot reload
-Example:
-```bash
-./mtproto-proxy \
-  -u nobody \
-  -p 8888 \
-  -H 443 \
-  -S <bootstrap-secret> \
-  --aes-pwd proxy-secret \
-  --admin-socket /run/mtproxy/admin.sock \
-  --secrets-state /var/lib/mtproxy/secrets.tsv \
-  proxy-multi.conf
+proxyctl config set client-port 443
+proxyctl config set stats-port 8888
+proxyctl config set public-host 1.2.3.4
+proxyctl config set bootstrap-secret <hex32>
+proxyctl config set admin-token <token>
+proxyctl config set secret-prefix dd
 ```
 
-If you use the installer, runtime values are in `/etc/default/mtproxy-fork` and the service file template is `systemd/mtproxy-fork.service`.
+Notes:
+- Port/token changes restart service when required.
+- Bootstrap secret change is applied via runtime API and persisted.
 
-HTTP/JSON endpoints over Unix socket:
-- `GET /v1/status`
-- `GET /v1/secrets`
-- `POST /v1/secrets`
-- `DELETE /v1/secrets/{secret_hex}`
-- `PATCH /v1/secrets/{secret_hex}/enable`
-- `PATCH /v1/secrets/{secret_hex}/disable`
-
-Accepted secret formats in API:
-- plain hex: `<32 hex>`
-- random-padding form: `dd<32 hex>`
-- TLS-like form: `ee<32 hex>[optional hex suffix]`
-
-The runtime stores canonical 16-byte secret internally; `dd`/`ee` are accepted on input for link compatibility.
-
-`POST /v1/secrets` body example:
-```json
-{"secret":"11111111111111111111111111111111","label":"user42","enabled":true,"expires":0}
-```
-
-Example via Python Unix socket:
-```bash
-python3 - <<'PY'
-import socket
-sock="/run/mtproxy/admin.sock"
-req = (
-  "GET /v1/status HTTP/1.1\\r\\n"
-  "Host: local\\r\\n"
-  "Content-Length: 0\\r\\n\\r\\n"
-).encode()
-s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(sock)
-s.sendall(req)
-print(s.recv(65535).decode())
-s.close()
-PY
-```
-
-Legacy line protocol is also supported:
-- `STATUS`
-- `LIST`
-- `ADD secret=<hex32> label=<label> expires=<unix_ts_or_0> enabled=<0|1>`
-- `REMOVE secret=<hex32>`
-- `ENABLE secret=<hex32>`
-- `DISABLE secret=<hex32>`
-
-If `--admin-token` is configured:
-- HTTP: send header `X-Admin-Token: <token>`
-- Line protocol: include `token=<token>` in command arguments.
+## External Control for Bot (from another server)
+Recommended production method: **SSH to proxy server and run `proxyctl`**.
 
 Examples:
 ```bash
-python3 - <<'PY'
-import socket
-sock="/run/mtproxy/admin.sock"
-for cmd in [
-  "STATUS",
-  "ADD secret=11111111111111111111111111111111 label=user42 enabled=1 expires=0",
-  "LIST",
-  "DISABLE secret=11111111111111111111111111111111",
-]:
-  s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-  s.connect(sock)
-  s.sendall((cmd+"\\n").encode())
-  print(s.recv(65535).decode(), end="")
-  s.close()
-PY
+ssh bulldogtg1 "proxyctl health"
+ssh bulldogtg1 "proxyctl secret issue user_987 --days 30"
+ssh bulldogtg1 "proxyctl secret disable <hex32>"
+ssh bulldogtg1 "proxyctl secret remove <hex32>"
 ```
 
-CLI helper (installed as `proxyctl`):
+This gives full lifecycle control for subscriptions:
+1. issue on payment
+2. disable on grace/failure
+3. remove on final expiry
+
+### Security recommendations for bot integration
+- Create dedicated SSH key for bot.
+- Restrict source IPs in firewall.
+- Prefer dedicated low-privilege account with limited sudo rule for `proxyctl` if needed.
+- Keep admin API on Unix socket local-only (default). Do not expose to internet.
+
+## Local Admin API
+Socket path (default): `/var/lib/mtproxy-fork/admin.sock`
+
+Auth:
+- `X-Admin-Token: <token>`
+
+Endpoints:
+- `GET /v1/status`
+- `GET /v1/secrets`
+- `POST /v1/secrets`
+- `DELETE /v1/secrets/{secret}`
+- `PATCH /v1/secrets/{secret}/enable`
+- `PATCH /v1/secrets/{secret}/disable`
+
+Accepted secret formats:
+- plain: `<32 hex>`
+- dd: `dd<32 hex>`
+- ee/tls-like: `ee<32 hex>[optional hex suffix]`
+
+## Hot Reload Behavior
+- Secret updates affect **new handshakes immediately**.
+- Existing active sessions continue naturally.
+- State file is atomically persisted and restored after restart.
+
+## Build From Source
 ```bash
-proxyctl status
-proxyctl secret list
-proxyctl secret add 11111111111111111111111111111111 --label user42
-proxyctl secret disable 11111111111111111111111111111111
-proxyctl secret remove 11111111111111111111111111111111
+apt-get update
+apt-get install -y build-essential git curl libssl-dev zlib1g-dev
+make -j"$(nproc)"
 ```
 
-5. Generate the link with following schema: `tg://proxy?server=SERVER_NAME&port=PORT&secret=SECRET` (or let the official bot generate it for you).
-6. Register your proxy with [@MTProxybot](https://t.me/MTProxybot) on Telegram.
-7. Set received tag with arguments: `-P <proxy tag>`
-8. Enjoy.
+Binary path:
+- `objs/bin/mtproto-proxy`
 
-## Random padding
-Due to some ISPs detecting MTProxy by packet sizes, random padding is
-added to packets if such mode is enabled.
+## Systemd Unit Template
+- `systemd/mtproxy-fork.service`
 
-It's only enabled for clients which request it.
+Installed unit:
+- `/etc/systemd/system/mtproxy-fork.service`
 
-Add `dd` prefix to secret (`cafe...babe` => `ddcafe...babe`) to enable
-this mode on client side.
+## Current Limitation (Planned v2)
+`--slaves` + hot reload is not enabled yet. Planned next stage:
+- inter-process sync/shared state for multi-process hot reload.
 
-## Systemd example configuration
-1. Create systemd service file (it's standard path for the most Linux distros, but you should check it before):
-```bash
-nano /etc/systemd/system/MTProxy.service
-```
-2. Edit this basic service (especially paths and params):
-```bash
-[Unit]
-Description=MTProxy
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/MTProxy
-ExecStart=/opt/MTProxy/mtproto-proxy -u nobody -p 8888 -H 443 -S <secret> -P <proxy tag> <other params>
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-3. Reload daemons:
-```bash
-systemctl daemon-reload
-```
-4. Test fresh MTProxy service:
-```bash
-systemctl restart MTProxy.service
-# Check status, it should be active
-systemctl status MTProxy.service
-```
-5. Enable it, to autostart service after reboot:
-```bash
-systemctl enable MTProxy.service
-```
-
-## Docker image
-Telegram is also providing [official Docker image](https://hub.docker.com/r/telegrammessenger/proxy/).
-Note: the image is outdated.

@@ -2,28 +2,106 @@
 set -euo pipefail
 
 ENV_FILE="${MTPROXY_ENV_FILE:-/etc/default/mtproxy-fork}"
-if [[ -r "$ENV_FILE" ]]; then
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-fi
+SERVICE_NAME="${MTPROXY_SERVICE:-mtproxy-fork}"
 
-SOCK="${MTPROXY_SOCKET:-${ADMIN_SOCKET:-/var/lib/mtproxy-fork/admin.sock}}"
-TOKEN="${MTPROXY_TOKEN:-${ADMIN_TOKEN:-}}"
+load_env() {
+  if [[ -r "$ENV_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+  fi
+  : "${CLIENT_PORT:=443}"
+  : "${STATS_PORT:=8888}"
+  : "${PUBLIC_HOST:=}"
+  : "${BOOTSTRAP_SECRET:=}"
+  : "${SECRET_PREFIX:=dd}"
+  : "${ADMIN_SOCKET:=/var/lib/mtproxy-fork/admin.sock}"
+  : "${STATE_FILE:=/var/lib/mtproxy-fork/secrets.tsv}"
+  : "${ADMIN_TOKEN:=}"
+}
+
+load_env
+
+SOCK="${MTPROXY_SOCKET:-$ADMIN_SOCKET}"
+TOKEN="${MTPROXY_TOKEN:-$ADMIN_TOKEN}"
 
 usage() {
   cat <<USAGE
 Usage:
   proxyctl status
+  proxyctl health
+  proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd]
+
+  proxyctl service status|start|stop|restart|logs
+  proxyctl config show
+  proxyctl config set client-port <1..65535>
+  proxyctl config set stats-port <1..65535>
+  proxyctl config set public-host <host_or_ip>
+  proxyctl config set bootstrap-secret <hex32>
+  proxyctl config set admin-token <token>
+  proxyctl config set secret-prefix <dd|plain>
+
   proxyctl secret list
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
+  proxyctl secret issue <label> [--days <n> | --expires <unix_ts>] [--prefix dd|plain|ee]
   proxyctl secret remove <secret>
   proxyctl secret enable <secret>
   proxyctl secret disable <secret>
 
+  proxyctl menu
+
 Env overrides:
-  MTPROXY_SOCKET=/path/to/admin.sock
+  MTPROXY_ENV_FILE=/etc/default/mtproxy-fork
+  MTPROXY_SOCKET=/var/lib/mtproxy-fork/admin.sock
   MTPROXY_TOKEN=<admin token>
 USAGE
+}
+
+warn() {
+  echo "[WARN] $*" >&2
+}
+
+die() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    die "This action requires root"
+  fi
+}
+
+require_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  (( p >= 1 && p <= 65535 )) || return 1
+  return 0
+}
+
+require_hex32() {
+  [[ "$1" =~ ^[0-9a-fA-F]{32}$ ]]
+}
+
+rand_hex16() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 16
+    return
+  fi
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+detect_public_host() {
+  local ip
+  ip="$(curl -4 -fsSL --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  if [[ -n "$ip" ]]; then
+    echo "$ip"
+    return
+  fi
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+ensure_socket() {
+  [[ -S "$SOCK" ]] || die "Admin socket not found: $SOCK"
 }
 
 json_escape() {
@@ -44,80 +122,481 @@ request() {
   fi
   cmd+=("http://localhost$path")
   "${cmd[@]}"
+}
+
+api() {
+  ensure_socket
+  request "$@"
   echo
 }
 
-[[ -S "$SOCK" ]] || {
-  echo "Admin socket not found: $SOCK" >&2
-  exit 1
+service_cmd() {
+  local action="$1"
+  case "$action" in
+    status)
+      systemctl --no-pager --full status "$SERVICE_NAME.service"
+      ;;
+    start|stop|restart)
+      require_root
+      systemctl "$action" "$SERVICE_NAME.service"
+      ;;
+    logs)
+      journalctl -u "$SERVICE_NAME.service" --no-pager -n 120
+      ;;
+    *)
+      die "Unknown service action: $action"
+      ;;
+  esac
+}
+
+update_env_key() {
+  local key="$1"
+  local value="$2"
+  local tmp
+  tmp="$(mktemp)"
+  if [[ -r "$ENV_FILE" ]]; then
+    awk -F= -v k="$key" -v v="$value" '
+      BEGIN {found=0}
+      $1 == k {print k "=" v; found=1; next}
+      {print}
+      END {if (!found) print k "=" v}
+    ' "$ENV_FILE" > "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" > "$tmp"
+  fi
+  install -m 0640 -o root -g mtproxy "$tmp" "$ENV_FILE" 2>/dev/null || install -m 0640 "$tmp" "$ENV_FILE"
+  rm -f "$tmp"
+}
+
+link_secret() {
+  local sec="$1"
+  local pref="${2:-$SECRET_PREFIX}"
+  case "${pref,,}" in
+    plain|"") echo "$sec" ;;
+    dd) echo "dd$sec" ;;
+    ee) echo "ee$sec" ;;
+    *) echo "$sec" ;;
+  esac
+}
+
+show_links() {
+  local sec="$1"
+  local host="${2:-$PUBLIC_HOST}"
+  local port="${3:-$CLIENT_PORT}"
+  local pref="${4:-$SECRET_PREFIX}"
+  [[ -n "$host" ]] || host="$(detect_public_host)"
+  [[ -n "$host" ]] || die "Cannot determine public host; set it with: proxyctl config set public-host <host>"
+  local secret_out
+  secret_out="$(link_secret "$sec" "$pref")"
+  echo "https://t.me/proxy?server=${host}&port=${port}&secret=${secret_out}"
+  echo "tg://proxy?server=${host}&port=${port}&secret=${secret_out}"
+}
+
+cmd_status() {
+  api GET /v1/status
+}
+
+cmd_health() {
+  local active="no"
+  local api_ok="no"
+  local listen="no"
+  if systemctl is-active --quiet "$SERVICE_NAME.service"; then
+    active="yes"
+  fi
+  if [[ -S "$SOCK" ]]; then
+    if request GET /v1/status >/dev/null 2>&1; then
+      api_ok="yes"
+    fi
+  fi
+  if ss -ltn | awk '{print $4}' | grep -qE "(^|:)${CLIENT_PORT}$"; then
+    listen="yes"
+  fi
+  printf '{"service_active":"%s","api_ok":"%s","listener_%s":"%s"}\n' "$active" "$api_ok" "$CLIENT_PORT" "$listen"
+}
+
+cmd_link() {
+  local sec="${BOOTSTRAP_SECRET,,}"
+  local host="$PUBLIC_HOST"
+  local port="$CLIENT_PORT"
+  local pref="$SECRET_PREFIX"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --secret)
+        sec="${2:-}"; shift 2 ;;
+      --host)
+        host="${2:-}"; shift 2 ;;
+      --port)
+        port="${2:-}"; shift 2 ;;
+      --plain)
+        pref="plain"; shift ;;
+      --dd)
+        pref="dd"; shift ;;
+      --ee)
+        pref="ee"; shift ;;
+      *)
+        die "Unknown link option: $1"
+        ;;
+    esac
+  done
+  require_hex32 "$sec" || die "secret must be 32 hex chars"
+  require_port "$port" || die "port must be 1..65535"
+  show_links "${sec,,}" "$host" "$port" "$pref"
+}
+
+cmd_config_show() {
+  cat <<CFG
+ENV_FILE=$ENV_FILE
+CLIENT_PORT=$CLIENT_PORT
+STATS_PORT=$STATS_PORT
+PUBLIC_HOST=$PUBLIC_HOST
+BOOTSTRAP_SECRET=$BOOTSTRAP_SECRET
+SECRET_PREFIX=$SECRET_PREFIX
+ADMIN_SOCKET=$ADMIN_SOCKET
+STATE_FILE=$STATE_FILE
+ADMIN_TOKEN=${ADMIN_TOKEN:0:8}...
+CFG
+  echo "Default links:"
+  cmd_link
+}
+
+apply_runtime_bootstrap_swap() {
+  local old="$1"
+  local new="$2"
+  if [[ -S "$SOCK" ]]; then
+    local payload
+    payload="{\"secret\":\"$new\",\"label\":\"bootstrap\",\"enabled\":true,\"expires\":0}"
+    request POST /v1/secrets "$payload" >/dev/null || warn "failed to add new bootstrap secret via runtime API"
+    if [[ -n "$old" && "$old" != "$new" ]]; then
+      request DELETE "/v1/secrets/$old" >/dev/null || warn "old bootstrap secret not removed (can remove manually)"
+    fi
+  fi
+}
+
+cmd_config_set() {
+  require_root
+  local key="${1:-}"
+  local val="${2:-}"
+  [[ -n "$key" && -n "$val" ]] || die "Usage: proxyctl config set <key> <value>"
+
+  case "$key" in
+    client-port)
+      require_port "$val" || die "invalid port"
+      update_env_key CLIENT_PORT "$val"
+      CLIENT_PORT="$val"
+      systemctl restart "$SERVICE_NAME.service"
+      echo "client-port updated to $val"
+      cmd_link
+      ;;
+    stats-port)
+      require_port "$val" || die "invalid port"
+      update_env_key STATS_PORT "$val"
+      STATS_PORT="$val"
+      systemctl restart "$SERVICE_NAME.service"
+      echo "stats-port updated to $val"
+      ;;
+    public-host)
+      update_env_key PUBLIC_HOST "$val"
+      PUBLIC_HOST="$val"
+      echo "public-host updated"
+      cmd_link
+      ;;
+    admin-token)
+      update_env_key ADMIN_TOKEN "$val"
+      ADMIN_TOKEN="$val"
+      TOKEN="$val"
+      systemctl restart "$SERVICE_NAME.service"
+      echo "admin-token updated and service restarted"
+      ;;
+    bootstrap-secret)
+      require_hex32 "$val" || die "bootstrap-secret must be 32 hex chars"
+      val="${val,,}"
+      apply_runtime_bootstrap_swap "${BOOTSTRAP_SECRET,,}" "$val"
+      update_env_key BOOTSTRAP_SECRET "$val"
+      BOOTSTRAP_SECRET="$val"
+      echo "bootstrap-secret updated"
+      cmd_link
+      ;;
+    secret-prefix)
+      case "${val,,}" in
+        dd|plain)
+          ;;
+        *)
+          die "secret-prefix must be dd or plain"
+          ;;
+      esac
+      if [[ "${val,,}" == "plain" ]]; then
+        val=""
+      else
+        val="dd"
+      fi
+      update_env_key SECRET_PREFIX "$val"
+      SECRET_PREFIX="$val"
+      echo "secret-prefix updated"
+      cmd_link
+      ;;
+    *)
+      die "Unknown config key: $key"
+      ;;
+  esac
+}
+
+cmd_secret_add() {
+  local secret="$1"
+  shift
+  local label=""
+  local expires="0"
+  local enabled="true"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --label)
+        label="${2:-}"; shift 2 ;;
+      --expires)
+        expires="${2:-}"; [[ "$expires" =~ ^[0-9]+$ ]] || die "expires must be unix timestamp"; shift 2 ;;
+      --disabled)
+        enabled="false"; shift ;;
+      --enabled)
+        enabled="true"; shift ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  local payload
+  payload="{\"secret\":\"$(json_escape "$secret")\",\"label\":\"$(json_escape "$label")\",\"expires\":$expires,\"enabled\":$enabled}"
+  api POST /v1/secrets "$payload"
+}
+
+cmd_secret_issue() {
+  local label="${1:-}"
+  [[ -n "$label" ]] || die "Usage: proxyctl secret issue <label> [--days N|--expires TS] [--prefix dd|plain|ee]"
+  shift
+
+  local days=""
+  local expires="0"
+  local prefix="$SECRET_PREFIX"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --days)
+        days="${2:-}"; [[ "$days" =~ ^[0-9]+$ ]] || die "days must be integer"; shift 2 ;;
+      --expires)
+        expires="${2:-}"; [[ "$expires" =~ ^[0-9]+$ ]] || die "expires must be unix timestamp"; shift 2 ;;
+      --prefix)
+        prefix="${2:-}"; shift 2 ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  if [[ -n "$days" ]]; then
+    expires="$(( $(date +%s) + days * 86400 ))"
+  fi
+
+  local secret
+  secret="$(rand_hex16)"
+  cmd_secret_add "$secret" --label "$label" --expires "$expires" >/dev/null
+
+  local host
+  host="$PUBLIC_HOST"
+  [[ -n "$host" ]] || host="$(detect_public_host)"
+  local out_secret
+  out_secret="$(link_secret "$secret" "$prefix")"
+
+  printf '{"ok":true,"secret":"%s","expires":%s,"link":"https://t.me/proxy?server=%s&port=%s&secret=%s"}\n' \
+    "$secret" "$expires" "$host" "$CLIENT_PORT" "$out_secret"
+}
+
+cmd_secret() {
+  local sub="${1:-}"
+  case "$sub" in
+    list)
+      api GET /v1/secrets
+      ;;
+    add)
+      local secret="${2:-}"
+      [[ -n "$secret" ]] || die "Usage: proxyctl secret add <secret> ..."
+      shift 2
+      cmd_secret_add "$secret" "$@"
+      ;;
+    issue)
+      local label="${2:-}"
+      [[ -n "$label" ]] || die "Usage: proxyctl secret issue <label> ..."
+      shift 2
+      cmd_secret_issue "$label" "$@"
+      ;;
+    remove)
+      local secret_rm="${2:-}"
+      [[ -n "$secret_rm" ]] || die "Usage: proxyctl secret remove <secret>"
+      api DELETE "/v1/secrets/$secret_rm"
+      ;;
+    enable)
+      local secret_en="${2:-}"
+      [[ -n "$secret_en" ]] || die "Usage: proxyctl secret enable <secret>"
+      api PATCH "/v1/secrets/$secret_en/enable"
+      ;;
+    disable)
+      local secret_dis="${2:-}"
+      [[ -n "$secret_dis" ]] || die "Usage: proxyctl secret disable <secret>"
+      api PATCH "/v1/secrets/$secret_dis/disable"
+      ;;
+    *)
+      die "Unknown secret action: $sub"
+      ;;
+  esac
+}
+
+run_safe() {
+  if ! "$@"; then
+    warn "Command failed: $*"
+  fi
+}
+
+menu_header() {
+  echo
+  echo "========== MTProxy Control Menu =========="
+  echo "Service : $SERVICE_NAME"
+  echo "Host    : ${PUBLIC_HOST:-$(detect_public_host)}"
+  echo "Port    : $CLIENT_PORT"
+  echo "------------------------------------------"
+}
+
+menu_cmd() {
+  while true; do
+    menu_header
+    echo "1) Service status"
+    echo "2) Health check"
+    echo "3) Show default links"
+    echo "4) List users (secrets)"
+    echo "5) Issue new user (secret + link)"
+    echo "6) Disable user"
+    echo "7) Enable user"
+    echo "8) Remove user"
+    echo "9) Change client port (restart service)"
+    echo "10) Change bootstrap secret"
+    echo "11) Change public host"
+    echo "12) Restart service"
+    echo "13) Show service logs"
+    echo "0) Exit"
+    printf "Select: "
+    IFS= read -r choice || true
+
+    case "$choice" in
+      1)
+        run_safe service_cmd status
+        ;;
+      2)
+        run_safe cmd_health
+        ;;
+      3)
+        run_safe cmd_link
+        ;;
+      4)
+        run_safe cmd_secret list
+        ;;
+      5)
+        printf "Label: "
+        IFS= read -r label || true
+        [[ -n "$label" ]] || { warn "label is required"; continue; }
+        printf "Days (empty for no expiry): "
+        IFS= read -r days || true
+        if [[ -n "$days" ]]; then
+          run_safe cmd_secret issue "$label" --days "$days"
+        else
+          run_safe cmd_secret issue "$label"
+        fi
+        ;;
+      6)
+        printf "Secret to disable: "
+        IFS= read -r secd || true
+        [[ -n "$secd" ]] && run_safe cmd_secret disable "$secd"
+        ;;
+      7)
+        printf "Secret to enable: "
+        IFS= read -r sece || true
+        [[ -n "$sece" ]] && run_safe cmd_secret enable "$sece"
+        ;;
+      8)
+        printf "Secret to remove: "
+        IFS= read -r secr || true
+        [[ -n "$secr" ]] && run_safe cmd_secret remove "$secr"
+        ;;
+      9)
+        printf "New client port: "
+        IFS= read -r newport || true
+        [[ -n "$newport" ]] && run_safe cmd_config_set client-port "$newport"
+        ;;
+      10)
+        printf "New bootstrap secret (32 hex): "
+        IFS= read -r news || true
+        [[ -n "$news" ]] && run_safe cmd_config_set bootstrap-secret "$news"
+        ;;
+      11)
+        printf "New public host/IP: "
+        IFS= read -r newhost || true
+        [[ -n "$newhost" ]] && run_safe cmd_config_set public-host "$newhost"
+        ;;
+      12)
+        run_safe service_cmd restart
+        ;;
+      13)
+        run_safe service_cmd logs
+        ;;
+      0)
+        exit 0
+        ;;
+      *)
+        warn "Unknown option"
+        ;;
+    esac
+
+    echo
+    printf "Press Enter to continue... "
+    IFS= read -r _ || true
+  done
 }
 
 cmd="${1:-}"
 case "$cmd" in
   status)
-    request GET /v1/status
+    cmd_status
     ;;
-  secret)
+  health)
+    cmd_health
+    ;;
+  link)
+    shift
+    cmd_link "$@"
+    ;;
+  service)
+    sub="${2:-}"
+    [[ -n "$sub" ]] || die "Usage: proxyctl service status|start|stop|restart|logs"
+    service_cmd "$sub"
+    ;;
+  config)
     sub="${2:-}"
     case "$sub" in
-      list)
-        request GET /v1/secrets
+      show)
+        cmd_config_show
         ;;
-      add)
-        secret="${3:-}"
-        [[ -n "$secret" ]] || { usage; exit 1; }
-        shift 3
-        label=""
-        expires="0"
-        enabled="true"
-        while [[ $# -gt 0 ]]; do
-          case "$1" in
-            --label)
-              label="${2:-}"
-              shift 2
-              ;;
-            --expires)
-              expires="${2:-}"
-              [[ "$expires" =~ ^[0-9]+$ ]] || { echo "expires must be unix timestamp" >&2; exit 1; }
-              shift 2
-              ;;
-            --disabled)
-              enabled="false"
-              shift
-              ;;
-            --enabled)
-              enabled="true"
-              shift
-              ;;
-            *)
-              usage
-              exit 1
-              ;;
-          esac
-        done
-        payload="{\"secret\":\"$(json_escape "$secret")\",\"label\":\"$(json_escape "$label")\",\"expires\":$expires,\"enabled\":$enabled}"
-        request POST /v1/secrets "$payload"
-        ;;
-      remove)
-        secret="${3:-}"
-        [[ -n "$secret" ]] || { usage; exit 1; }
-        request DELETE "/v1/secrets/$secret"
-        ;;
-      enable)
-        secret="${3:-}"
-        [[ -n "$secret" ]] || { usage; exit 1; }
-        request PATCH "/v1/secrets/$secret/enable"
-        ;;
-      disable)
-        secret="${3:-}"
-        [[ -n "$secret" ]] || { usage; exit 1; }
-        request PATCH "/v1/secrets/$secret/disable"
+      set)
+        shift 2
+        cmd_config_set "$@"
         ;;
       *)
-        usage
-        exit 1
+        die "Usage: proxyctl config show | proxyctl config set <key> <value>"
         ;;
     esac
+    ;;
+  secret)
+    shift
+    cmd_secret "$@"
+    ;;
+  menu)
+    menu_cmd
     ;;
   *)
     usage

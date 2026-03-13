@@ -13,9 +13,12 @@ ENV_FILE="/etc/default/mtproxy-fork"
 UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 CTL_PATH="/usr/local/bin/proxyctl"
+MENU_PATH="/usr/local/bin/mtproxymenu"
 
 CLIENT_PORT="443"
 STATS_PORT="8888"
+PUBLIC_HOST=""
+SECRET_PREFIX="dd"
 ADMIN_SOCKET="$DATA_DIR/admin.sock"
 STATE_FILE="$DATA_DIR/secrets.tsv"
 CLEAN_OLD="yes"
@@ -31,6 +34,20 @@ if ! command -v apt-get >/dev/null 2>&1; then
   exit 1
 fi
 
+print_logo() {
+  cat <<'LOGO'
+
+██████╗ ██╗   ██╗██╗     ██╗     ██████╗  ██████╗  ██████╗
+██╔══██╗██║   ██║██║     ██║     ██╔══██╗██╔═══██╗██╔════╝
+██████╔╝██║   ██║██║     ██║     ██║  ██║██║   ██║██║  ███╗
+██╔══██╗██║   ██║██║     ██║     ██║  ██║██║   ██║██║   ██║
+██████╔╝╚██████╔╝███████╗███████╗██████╔╝╚██████╔╝╚██████╔╝
+╚═════╝  ╚═════╝ ╚══════╝╚══════╝╚═════╝  ╚═════╝  ╚═════╝
+
+MTProxy Fork Installer (Hot Secret Reload)
+LOGO
+}
+
 is_interactive=0
 tty_fd=9
 if [[ -t 1 ]]; then
@@ -43,12 +60,34 @@ if [[ -t 1 ]]; then
   fi
 fi
 
+say() {
+  echo "$*"
+}
+
+warn() {
+  echo "[WARN] $*" >&2
+}
+
+die() {
+  echo "[ERROR] $*" >&2
+  exit 1
+}
+
 rand_hex16() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 16
     return
   fi
   od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+detect_public_host() {
+  local ip
+  ip="$(curl -4 -fsSL --max-time 5 https://api.ipify.org || true)"
+  if [[ -z "$ip" ]]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  echo "$ip"
 }
 
 require_port() {
@@ -97,53 +136,109 @@ prompt_yes_no() {
   case "${val,,}" in
     y|yes) printf -v "$__var" '%s' "yes" ;;
     n|no) printf -v "$__var" '%s' "no" ;;
-    *)
-      printf -v "$__var" '%s' "$def"
-      ;;
+    *) printf -v "$__var" '%s' "$def" ;;
   esac
 }
 
+prompt_port() {
+  local __var="$1"
+  local question="$2"
+  local def="$3"
+  local val
+  while true; do
+    prompt_default val "$question" "$def"
+    if require_port "$val"; then
+      printf -v "$__var" '%s' "$val"
+      return 0
+    fi
+    if (( ! is_interactive )); then
+      die "Invalid non-interactive value for $question: $val"
+    fi
+    warn "Invalid port: $val"
+  done
+}
+
+prompt_hex32() {
+  local __var="$1"
+  local question="$2"
+  local def="$3"
+  local val
+  while true; do
+    prompt_default val "$question" "$def"
+    if require_hex32 "$val"; then
+      printf -v "$__var" '%s' "${val,,}"
+      return 0
+    fi
+    if (( ! is_interactive )); then
+      die "Invalid non-interactive value for $question"
+    fi
+    warn "Value must be exactly 32 hex chars"
+  done
+}
+
+prompt_nonempty() {
+  local __var="$1"
+  local question="$2"
+  local def="$3"
+  local val
+  while true; do
+    prompt_default val "$question" "$def"
+    if [[ -n "$val" ]]; then
+      printf -v "$__var" '%s' "$val"
+      return 0
+    fi
+    if (( ! is_interactive )); then
+      die "Invalid non-interactive empty value for $question"
+    fi
+    warn "Value cannot be empty"
+  done
+}
+
+print_logo
+
 BOOTSTRAP_SECRET="$(rand_hex16)"
 ADMIN_TOKEN="$(rand_hex16)$(rand_hex16)"
+PUBLIC_HOST="$(detect_public_host)"
 
-prompt_default CLIENT_PORT "Client port" "$CLIENT_PORT"
-require_port "$CLIENT_PORT" || { echo "Invalid client port: $CLIENT_PORT" >&2; exit 1; }
+say "Installer mode: $([[ $is_interactive -eq 1 ]] && echo interactive || echo non-interactive)"
 
-prompt_default STATS_PORT "Local stats port" "$STATS_PORT"
-require_port "$STATS_PORT" || { echo "Invalid stats port: $STATS_PORT" >&2; exit 1; }
+prompt_port CLIENT_PORT "Client port (Telegram users connect here)" "$CLIENT_PORT"
+prompt_port STATS_PORT "Local stats port" "$STATS_PORT"
+prompt_default PUBLIC_HOST "Public host/IP for generated links" "${PUBLIC_HOST:-0.0.0.0}"
+prompt_hex32 BOOTSTRAP_SECRET "Bootstrap secret (32 hex)" "$BOOTSTRAP_SECRET"
+prompt_nonempty ADMIN_TOKEN "Admin API token" "$ADMIN_TOKEN"
+prompt_default SECRET_PREFIX "Default link secret prefix (dd/plain)" "$SECRET_PREFIX"
+if [[ "${SECRET_PREFIX,,}" == "plain" ]]; then
+  SECRET_PREFIX=""
+else
+  SECRET_PREFIX="dd"
+fi
+prompt_yes_no CLEAN_OLD "Delete old mtproxy/mtprotor installations first" "yes"
+prompt_yes_no REFRESH_TG_CONFIG "Refresh Telegram proxy-secret/proxy-multi.conf" "yes"
 
-prompt_default BOOTSTRAP_SECRET "Bootstrap secret (32 hex)" "$BOOTSTRAP_SECRET"
-require_hex32 "$BOOTSTRAP_SECRET" || { echo "Invalid bootstrap secret (must be 32 hex chars)" >&2; exit 1; }
-
-prompt_default ADMIN_TOKEN "Admin API token (hex/string)" "$ADMIN_TOKEN"
-[[ -n "$ADMIN_TOKEN" ]] || { echo "Admin token cannot be empty" >&2; exit 1; }
-
-prompt_yes_no CLEAN_OLD "Delete old mtproxy/mtprotor services and files first" "yes"
-prompt_yes_no REFRESH_TG_CONFIG "Refresh Telegram proxy config files (proxy-secret/proxy-multi.conf)" "yes"
-
-echo "[1/8] Installing build dependencies..."
+say "[1/9] Installing build dependencies..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
   ca-certificates curl git make gcc libc6-dev libssl-dev zlib1g-dev
 
 cleanup_old() {
-  echo "[2/8] Removing old services/processes..."
+  say "[2/9] Removing old services/processes/files..."
   systemctl disable --now mtprotor.service MTProxy.service "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$UNIT_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
-  rm -f "$ENV_FILE"
+  rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH"
   systemctl daemon-reload || true
 }
 
 if [[ "$CLEAN_OLD" == "yes" ]]; then
   cleanup_old
 else
-  echo "[2/8] Skipping old stack cleanup"
+  say "[2/9] Skipping cleanup by user choice"
 fi
 
-echo "[3/8] Cloning/updating source from $REPO_URL ($REPO_REF)..."
+say "[3/9] Cloning/updating source from $REPO_URL ($REPO_REF)..."
 if [[ -d "$INSTALL_DIR/.git" ]]; then
   git -C "$INSTALL_DIR" fetch --depth 1 origin "$REPO_REF"
   git -C "$INSTALL_DIR" checkout -q "$REPO_REF"
@@ -153,12 +248,12 @@ else
   git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$INSTALL_DIR"
 fi
 
-echo "[4/8] Building mtproto-proxy..."
+say "[4/9] Building mtproto-proxy..."
 make -C "$INSTALL_DIR" clean
 make -C "$INSTALL_DIR" -j"$(nproc)"
 install -m 0755 "$INSTALL_DIR/objs/bin/mtproto-proxy" "$BIN_PATH"
 
-echo "[5/8] Preparing runtime user and directories..."
+say "[5/9] Preparing runtime user and directories..."
 if ! id -u mtproxy >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --create-home --shell /usr/sbin/nologin mtproxy \
     || useradd --system --home-dir "$DATA_DIR" --create-home --shell /sbin/nologin mtproxy
@@ -176,7 +271,7 @@ download_to() {
   rm -f "$tmp"
 }
 
-echo "[6/8] Preparing Telegram config files..."
+say "[6/9] Preparing Telegram config files..."
 if [[ "$REFRESH_TG_CONFIG" == "yes" || ! -s "$CONF_DIR/proxy-secret" ]]; then
   download_to "https://core.telegram.org/getProxySecret" "$CONF_DIR/proxy-secret"
 fi
@@ -184,11 +279,13 @@ if [[ "$REFRESH_TG_CONFIG" == "yes" || ! -s "$CONF_DIR/proxy-multi.conf" ]]; the
   download_to "https://core.telegram.org/getProxyConfig" "$CONF_DIR/proxy-multi.conf"
 fi
 
-echo "[7/8] Writing local config, state and service files..."
+say "[7/9] Writing config/state/service files..."
 cat > "$ENV_FILE" <<ENV
 CLIENT_PORT=$CLIENT_PORT
 STATS_PORT=$STATS_PORT
-BOOTSTRAP_SECRET=$BOOTSTRAP_SECRET
+PUBLIC_HOST=$PUBLIC_HOST
+BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET,,}
+SECRET_PREFIX=$SECRET_PREFIX
 ADMIN_SOCKET=$ADMIN_SOCKET
 STATE_FILE=$STATE_FILE
 ADMIN_TOKEN=$ADMIN_TOKEN
@@ -196,46 +293,62 @@ ENV
 chown root:mtproxy "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
 
-if [[ ! -s "$STATE_FILE" ]]; then
-  now="$(date +%s)"
-  {
-    echo "v1"
-    printf "%s\t1\t0\t%s\t%s\tbootstrap\n" "$BOOTSTRAP_SECRET" "$now" "$now"
-  } > "$STATE_FILE"
-fi
+now="$(date +%s)"
+{
+  echo "v1"
+  printf "%s\t1\t0\t%s\t%s\tbootstrap\n" "${BOOTSTRAP_SECRET,,}" "$now" "$now"
+} > "$STATE_FILE"
 chown mtproxy:mtproxy "$STATE_FILE"
 chmod 0640 "$STATE_FILE"
 
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
 install -m 0755 "$INSTALL_DIR/scripts/proxyctl" "$CTL_PATH"
+cat > "$MENU_PATH" <<'MENU'
+#!/usr/bin/env bash
+exec /usr/local/bin/proxyctl menu "$@"
+MENU
+chmod 0755 "$MENU_PATH"
 
-echo "[8/8] Enabling and starting service..."
+say "[8/9] Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 sleep 1
+
+say "[9/9] Post-checks..."
 if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-  echo "Service failed to start. Last logs:" >&2
-  journalctl -u "$SERVICE_NAME" --no-pager -n 80 >&2 || true
-  exit 1
+  die "Service failed to start. Logs: journalctl -u $SERVICE_NAME -n 80"
+fi
+
+if [[ ! -S "$ADMIN_SOCKET" ]]; then
+  die "Admin socket not found: $ADMIN_SOCKET"
 fi
 
 if ! curl --silent --show-error --unix-socket "$ADMIN_SOCKET" -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost/v1/status >/dev/null; then
-  echo "Admin API check failed on $ADMIN_SOCKET" >&2
-  exit 1
+  die "Admin API check failed on $ADMIN_SOCKET"
 fi
 
-SERVER_IP="$(curl -4 -fsSL --max-time 5 https://api.ipify.org || true)"
-if [[ -z "$SERVER_IP" ]]; then
-  SERVER_IP="$(hostname -I | awk '{print $1}')"
+if ! ss -ltn | awk '{print $4}' | grep -qE "(^|:)${CLIENT_PORT}$"; then
+  die "Client port $CLIENT_PORT is not listening"
 fi
 
-echo
-echo "Install complete"
-echo "Service: systemctl status $SERVICE_NAME"
-echo "Manage secrets: proxyctl status | proxyctl secret list"
-echo "API socket: $ADMIN_SOCKET"
-echo "API token: $ADMIN_TOKEN"
-if [[ -n "$SERVER_IP" ]]; then
-  echo "Bootstrap link (recommended for iOS paste): https://t.me/proxy?server=${SERVER_IP}&port=${CLIENT_PORT}&secret=dd${BOOTSTRAP_SECRET}"
-  echo "Bootstrap deep-link: tg://proxy?server=${SERVER_IP}&port=${CLIENT_PORT}&secret=dd${BOOTSTRAP_SECRET}"
+if ! ss -ltn | awk '{print $4}' | grep -qE "(^|:)${STATS_PORT}$"; then
+  warn "Stats port $STATS_PORT is not listening externally (expected if loopback-only env)"
+fi
+
+if [[ -n "$SECRET_PREFIX" ]]; then
+  LINK_SECRET="${SECRET_PREFIX}${BOOTSTRAP_SECRET,,}"
+else
+  LINK_SECRET="${BOOTSTRAP_SECRET,,}"
+fi
+
+say
+say "Install complete"
+say "Service: systemctl status $SERVICE_NAME"
+say "Menu: mtproxymenu"
+say "CLI: proxyctl status | proxyctl secret list"
+say "API socket: $ADMIN_SOCKET"
+say "API token: $ADMIN_TOKEN"
+if [[ -n "$PUBLIC_HOST" ]]; then
+  say "Bootstrap link (iOS paste): https://t.me/proxy?server=${PUBLIC_HOST}&port=${CLIENT_PORT}&secret=${LINK_SECRET}"
+  say "Bootstrap deep-link: tg://proxy?server=${PUBLIC_HOST}&port=${CLIENT_PORT}&secret=${LINK_SECRET}"
 fi
