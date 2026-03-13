@@ -20,6 +20,7 @@ load_env() {
   : "${STATE_FILE:=/var/lib/mtproxy-fork/secrets.tsv}"
   : "${ADMIN_TOKEN:=}"
   : "${ADMIN_TOKEN_FILE:=/etc/mtproxy-fork/admin.token}"
+  : "${TLS_DOMAIN:=}"
   if [[ -z "${SECRET_PREFIX+x}" ]]; then
     SECRET_PREFIX="dd"
   elif [[ -z "$SECRET_PREFIX" ]]; then
@@ -84,7 +85,7 @@ usage() {
 Usage:
   proxyctl status
   proxyctl health
-  proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd|--ee]
+  proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd|--ee] [--domain <host>]
 
   proxyctl runtime status [--full|--json]
   proxyctl runtime start|stop|restart|logs|logs-live
@@ -99,6 +100,8 @@ Usage:
   proxyctl config set secret-prefix <plain|dd|ee>
   proxyctl config set stealth-mode <plain|dd|ee>
   proxyctl config set stealth-preset <standard|max-camouflage|compatibility>
+  proxyctl config set tls-domain <domain|off>
+  proxyctl config set domain-camouflage <domain|off>
 
   proxyctl secret list [--table]
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
@@ -382,10 +385,15 @@ write_admin_token_file() {
 link_secret() {
   local sec="$1"
   local pref="${2:-$SECRET_PREFIX}"
+  local tls_domain="${3:-$TLS_DOMAIN}"
+  local domain_hex=""
+  if [[ -n "${tls_domain:-}" ]]; then
+    domain_hex="$(domain_to_hex "$tls_domain")"
+  fi
   case "${pref,,}" in
     plain|"") echo "$sec" ;;
     dd) echo "dd$sec" ;;
-    ee) echo "ee$sec" ;;
+    ee) echo "ee$sec$domain_hex" ;;
     *) echo "$sec" ;;
   esac
 }
@@ -408,6 +416,39 @@ normalize_secret_prefix() {
     ee) echo "ee" ;;
     *) return 1 ;;
   esac
+}
+
+is_valid_domain_name() {
+  local d="${1,,}"
+  [[ -n "$d" ]] || return 1
+  [[ "$d" == *.* ]] || return 1
+  [[ "$d" != .* && "$d" != *. && "$d" != *..* ]] || return 1
+  [[ "$d" =~ ^[a-z0-9.-]+$ ]] || return 1
+  local part
+  IFS='.' read -r -a parts <<<"$d"
+  for part in "${parts[@]}"; do
+    [[ -n "$part" && ${#part} -le 63 ]] || return 1
+    [[ "$part" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+  done
+  return 0
+}
+
+normalize_tls_domain() {
+  local in="${1:-}"
+  case "${in,,}" in
+    ""|off|none|disable|disabled|no)
+      echo ""
+      return 0
+      ;;
+  esac
+  in="${in,,}"
+  is_valid_domain_name "$in" || return 1
+  echo "$in"
+}
+
+domain_to_hex() {
+  local d="${1,,}"
+  printf '%s' "$d" | od -An -tx1 -v | tr -d ' \n'
 }
 
 stealth_preset_to_mode() {
@@ -445,6 +486,12 @@ Stealth modes:
     - Secret in link uses ee<secret>[optional suffix].
     - More TLS-like transport behavior.
     - Best when you need stronger camouflage.
+
+Cover domain (optional, advanced):
+  - Set with: proxyctl config set tls-domain <domain>
+  - Example: proxyctl config set tls-domain www.google.com
+  - This forces runtime TLS-domain mode and appends domain suffix to ee links.
+  - Disable with: proxyctl config set tls-domain off
 TXT
 }
 
@@ -453,10 +500,11 @@ show_links() {
   local host="${2:-$PUBLIC_HOST}"
   local port="${3:-$CLIENT_PORT}"
   local pref="${4:-$SECRET_PREFIX}"
+  local tls_domain="${5:-$TLS_DOMAIN}"
   [[ -n "$host" ]] || host="$(detect_public_host)"
   [[ -n "$host" ]] || die "Cannot determine public host; set it with: proxyctl config set public-host <host>"
   local secret_out
-  secret_out="$(link_secret "$sec" "$pref")"
+  secret_out="$(link_secret "$sec" "$pref" "$tls_domain")"
   echo "https://t.me/proxy?server=${host}&port=${port}&secret=${secret_out}"
   echo "tg://proxy?server=${host}&port=${port}&secret=${secret_out}"
 }
@@ -552,6 +600,7 @@ cmd_link() {
   local host="$PUBLIC_HOST"
   local port="$CLIENT_PORT"
   local pref="$SECRET_PREFIX"
+  local tls_domain="$TLS_DOMAIN"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -567,6 +616,8 @@ cmd_link() {
         pref="dd"; shift ;;
       --ee)
         pref="ee"; shift ;;
+      --domain)
+        tls_domain="${2:-}"; shift 2 ;;
       *)
         die "Unknown link option: $1"
         ;;
@@ -574,7 +625,10 @@ cmd_link() {
   done
   require_hex32 "$sec" || die "secret must be 32 hex chars"
   require_port "$port" || die "port must be 1..65535"
-  show_links "${sec,,}" "$host" "$port" "$pref"
+  if [[ -n "$tls_domain" ]] && ! is_valid_domain_name "$tls_domain"; then
+    die "domain must be a valid hostname"
+  fi
+  show_links "${sec,,}" "$host" "$port" "$pref" "${tls_domain,,}"
 }
 
 cmd_config_show() {
@@ -586,6 +640,8 @@ PUBLIC_HOST=$PUBLIC_HOST
 BOOTSTRAP_SECRET=$BOOTSTRAP_SECRET
 SECRET_PREFIX=$SECRET_PREFIX
 STEALTH_MODE=$(stealth_mode_name)
+TLS_DOMAIN=${TLS_DOMAIN:-}
+DOMAIN_CAMOUFLAGE=$([[ -n "${TLS_DOMAIN:-}" ]] && echo enabled || echo disabled)
 ADMIN_SOCKET=$ADMIN_SOCKET
 STATE_FILE=$STATE_FILE
 ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
@@ -659,6 +715,9 @@ cmd_config_set() {
       if ! val="$(normalize_secret_prefix "$val")"; then
         die "secret-prefix must be plain, dd or ee"
       fi
+      if [[ -n "${TLS_DOMAIN:-}" && "$val" != "ee" ]]; then
+        die "TLS domain camouflage is enabled for '$TLS_DOMAIN'; stealth mode must stay 'ee' until tls-domain is off"
+      fi
       update_env_key SECRET_PREFIX "$val"
       SECRET_PREFIX="$val"
       echo "secret-prefix updated (mode: $(stealth_mode_name "$val"))"
@@ -668,9 +727,32 @@ cmd_config_set() {
       if ! val="$(stealth_preset_to_mode "$val")"; then
         die "stealth-preset must be standard, max-camouflage or compatibility"
       fi
+      if [[ -n "${TLS_DOMAIN:-}" && "$val" != "ee" ]]; then
+        die "TLS domain camouflage is enabled for '$TLS_DOMAIN'; choose max-camouflage (ee) or disable tls-domain first"
+      fi
       update_env_key SECRET_PREFIX "$val"
       SECRET_PREFIX="$val"
       echo "stealth-preset applied (mode: $(stealth_mode_name "$val"))"
+      cmd_link
+      ;;
+    tls-domain|domain-camouflage)
+      if ! val="$(normalize_tls_domain "$val")"; then
+        die "tls-domain must be a valid domain (example: www.google.com) or off"
+      fi
+      update_env_key TLS_DOMAIN "$val"
+      TLS_DOMAIN="$val"
+      if [[ -n "$val" ]]; then
+        if [[ "${SECRET_PREFIX,,}" != "ee" ]]; then
+          SECRET_PREFIX="ee"
+          update_env_key SECRET_PREFIX "ee"
+          echo "stealth-mode auto-switched to ee for TLS domain camouflage"
+        fi
+        systemctl restart "$SERVICE_NAME.service"
+        echo "tls-domain enabled: $val (runtime restarted)"
+      else
+        systemctl restart "$SERVICE_NAME.service"
+        echo "tls-domain disabled (runtime restarted)"
+      fi
       cmd_link
       ;;
     *)
@@ -998,15 +1080,18 @@ run_safe() {
 menu_header() {
   local snap active substate pid start_ts mem cpu listen host total active_secrets
   local stealth
+  local tls_domain
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
   stealth="$(stealth_mode_name)"
+  tls_domain="${TLS_DOMAIN:-off}"
   echo
   echo "=========== $(paint "$C_BOLD" "$BRAND_CONSOLE") ==========="
   echo "Runtime   : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
   echo "Node      : $BRAND_RUNTIME_ID  PID: $(paint "$C_CYAN" "$pid")"
   echo "Endpoint  : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
   echo "Stealth   : $(paint "$C_CYAN" "$stealth")"
+  echo "TLS Cover : $(paint "$C_CYAN" "$tls_domain")"
   echo "Users     : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
   echo "Started   : $start_ts (UTC)"
   echo "=================================================="
@@ -1100,16 +1185,20 @@ menu_bot_settings() {
 
 menu_stealth_settings() {
   while true; do
-    local current
+    local current domain
     current="$(stealth_mode_name)"
+    domain="${TLS_DOMAIN:-off}"
     echo
     echo "-------- $(paint "$C_BOLD" "Bulldog Stealth Settings") --------"
     echo "Current mode: $(paint "$C_CYAN" "$current")"
+    echo "TLS cover domain: $(paint "$C_CYAN" "$domain")"
     echo "1) Standard (dd)"
     echo "2) Max camouflage (ee)"
     echo "3) Compatibility (plain)"
     echo "4) Set custom mode (plain/dd/ee)"
-    echo "5) Explain modes"
+    echo "5) Set TLS cover domain (example: www.google.com)"
+    echo "6) Disable TLS cover domain"
+    echo "7) Explain modes"
     echo "0) Back"
     printf "Select: "
     IFS= read -r sch || true
@@ -1129,6 +1218,14 @@ menu_stealth_settings() {
         [[ -n "$mode" ]] && run_safe cmd_config_set stealth-mode "$mode"
         ;;
       5)
+        printf "Domain (example: www.google.com): "
+        IFS= read -r d || true
+        [[ -n "$d" ]] && run_safe cmd_config_set tls-domain "$d"
+        ;;
+      6)
+        run_safe cmd_config_set tls-domain off
+        ;;
+      7)
         print_stealth_explain
         ;;
       0)

@@ -6,6 +6,7 @@ UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
 EXPIRE_SYNC_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.service"
 EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
+RUNNER_PATH="/usr/local/bin/mtproxy-fork-run"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
 DOG_MENU_PATH="/usr/local/bin/dogmenu"
@@ -41,7 +42,7 @@ systemctl disable --now "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-f
 rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE"
 systemctl daemon-reload
 
-rm -f "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
+rm -f "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
 
 if (( PURGE_DATA )); then
   rm -rf "$CONF_DIR" "$DATA_DIR" "$ENV_FILE" /etc/mtproxy-fork/bot-access.env

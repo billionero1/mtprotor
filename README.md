@@ -41,6 +41,7 @@ Installer validation notes:
 After install:
 - service: `mtproxy-fork.service`
 - binary: `/usr/local/bin/mtproto-proxy-fork`
+- runtime launcher: `/usr/local/bin/mtproxy-fork-run`
 - CLI: `/usr/local/bin/dogctl` (compat: `/usr/local/bin/proxyctl`)
 - menu: `/usr/local/bin/dogmenu` (compat: `/usr/local/bin/mtproxymenu`)
 - bot SSH dispatcher: `/usr/local/bin/proxybot-dispatch`
@@ -139,6 +140,7 @@ Menu includes:
 - change bootstrap secret
 - change public host
 - stealth presets/mode (`standard`, `max-camouflage`, `compatibility`, or custom `plain/dd/ee`)
+- set/disable TLS cover domain (for domain camouflage)
 - restart service
 - bot SSH settings (change login/password/allow-from)
 - force run expired-user disable
@@ -162,16 +164,25 @@ proxyctl config set secret-prefix ee
 # alias:
 proxyctl config set stealth-mode plain
 proxyctl config set stealth-preset standard
+proxyctl config set tls-domain www.google.com
+proxyctl config set tls-domain off
 ```
 
 Notes:
 - Port/token changes restart service when required.
 - Bootstrap secret change is applied via runtime API and persisted.
+- `tls-domain` change restarts runtime and enables TLS domain camouflage mode.
+- When `tls-domain` is enabled, stealth mode is forced to `ee`.
 
 Stealth modes (simple):
 - `plain` = no prefix, max compatibility, minimum camouflage.
 - `dd` = default balanced mode (good compatibility + practical camouflage).
 - `ee` = more TLS-like behavior, maximum camouflage from available modes.
+
+TLS cover domain (optional):
+- Set with `proxyctl config set tls-domain <domain>` (example: `www.google.com`, `vk.com`, `yandex.ru`).
+- Generated links include `ee<secret><domain_hex_suffix>`.
+- Disable with `proxyctl config set tls-domain off`.
 
 ## External Control for Bot (from another server)
 Recommended production method: **SSH to proxy server and run `proxyctl bot ...`**.

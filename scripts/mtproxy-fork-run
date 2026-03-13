@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${MTPROXY_ENV_FILE:-/etc/default/mtproxy-fork}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+: "${STATS_PORT:=8888}"
+: "${CLIENT_PORT:=443}"
+: "${BOOTSTRAP_SECRET:=}"
+: "${ADMIN_SOCKET:=/var/lib/mtproxy-fork/admin.sock}"
+: "${STATE_FILE:=/var/lib/mtproxy-fork/secrets.tsv}"
+: "${TLS_DOMAIN:=}"
+
+cmd=(
+  /usr/local/bin/mtproto-proxy-fork
+  -p "$STATS_PORT"
+  -H "$CLIENT_PORT"
+  -S "$BOOTSTRAP_SECRET"
+  --aes-pwd /etc/mtproxy-fork/proxy-secret
+  --admin-socket "$ADMIN_SOCKET"
+  --secrets-state "$STATE_FILE"
+  --admin-token-file /etc/mtproxy-fork/admin.token
+)
+
+if [[ -n "$TLS_DOMAIN" ]]; then
+  IFS=',' read -r -a domains <<<"$TLS_DOMAIN"
+  for d in "${domains[@]}"; do
+    d="${d// /}"
+    [[ -n "$d" ]] || continue
+    cmd+=(--domain "$d")
+  done
+fi
+
+cmd+=(/etc/mtproxy-fork/proxy-multi.conf)
+exec "${cmd[@]}"

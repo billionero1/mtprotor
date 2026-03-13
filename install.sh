@@ -14,6 +14,7 @@ UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
 EXPIRE_SYNC_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.service"
 EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
+RUNNER_PATH="/usr/local/bin/mtproxy-fork-run"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
 DOG_MENU_PATH="/usr/local/bin/dogmenu"
@@ -26,6 +27,7 @@ CLIENT_PORT="443"
 STATS_PORT="8888"
 PUBLIC_HOST=""
 SECRET_PREFIX="dd"
+TLS_DOMAIN=""
 ADMIN_SOCKET="$DATA_DIR/admin.sock"
 STATE_FILE="$DATA_DIR/secrets.tsv"
 CLEAN_OLD="yes"
@@ -139,6 +141,26 @@ require_port() {
 
 require_hex32() {
   [[ "$1" =~ ^[0-9a-fA-F]{32}$ ]]
+}
+
+is_valid_domain_name() {
+  local d="${1,,}"
+  [[ -n "$d" ]] || return 1
+  [[ "$d" == *.* ]] || return 1
+  [[ "$d" != .* && "$d" != *. && "$d" != *..* ]] || return 1
+  [[ "$d" =~ ^[a-z0-9.-]+$ ]] || return 1
+  local p
+  IFS='.' read -r -a parts <<<"$d"
+  for p in "${parts[@]}"; do
+    [[ -n "$p" && ${#p} -le 63 ]] || return 1
+    [[ "$p" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || return 1
+  done
+  return 0
+}
+
+domain_to_hex() {
+  local d="${1,,}"
+  printf '%s' "$d" | od -An -tx1 -v | tr -d ' \n'
 }
 
 prompt_default() {
@@ -266,6 +288,15 @@ case "${SECRET_PREFIX,,}" in
     die "secret prefix must be plain, dd or ee"
     ;;
 esac
+prompt_default TLS_DOMAIN "Optional TLS cover domain (empty=off, example: www.google.com)" "$TLS_DOMAIN"
+TLS_DOMAIN="${TLS_DOMAIN,,}"
+if [[ -n "$TLS_DOMAIN" ]]; then
+  is_valid_domain_name "$TLS_DOMAIN" || die "invalid TLS cover domain: $TLS_DOMAIN"
+  if [[ "$SECRET_PREFIX" != "ee" ]]; then
+    warn "TLS cover domain requires ee mode; switching secret prefix to ee"
+    SECRET_PREFIX="ee"
+  fi
+fi
 prompt_yes_no CLEAN_OLD "Delete old mtproxy/mtprotor installations first" "yes"
 prompt_yes_no REFRESH_TG_CONFIG "Refresh Telegram proxy-secret/proxy-multi.conf" "yes"
 prompt_yes_no BOT_SSH_SETUP "Configure SSH bot credentials (login/password) now" "yes"
@@ -314,7 +345,7 @@ cleanup_old() {
   rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
-  rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
+  rm -f "$ENV_FILE" "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
   systemctl daemon-reload || true
 }
 
@@ -372,6 +403,7 @@ STATS_PORT=$STATS_PORT
 PUBLIC_HOST=$PUBLIC_HOST
 BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET,,}
 SECRET_PREFIX=$SECRET_PREFIX
+TLS_DOMAIN=$TLS_DOMAIN
 ADMIN_SOCKET=$ADMIN_SOCKET
 STATE_FILE=$STATE_FILE
 ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
@@ -396,6 +428,7 @@ chmod 0640 "$STATE_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.service" "$EXPIRE_SYNC_SERVICE_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.timer" "$EXPIRE_SYNC_TIMER_FILE"
+install -m 0755 "$INSTALL_DIR/scripts/mtproxy-fork-run" "$RUNNER_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/proxyctl" "$CTL_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/dogctl" "$DOG_CTL_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/dogmenu" "$DOG_MENU_PATH"
@@ -448,8 +481,15 @@ if [[ -n "$SECRET_PREFIX" ]]; then
     plain)
       LINK_SECRET="${BOOTSTRAP_SECRET,,}"
       ;;
-    dd|ee)
+    dd)
       LINK_SECRET="${SECRET_PREFIX,,}${BOOTSTRAP_SECRET,,}"
+      ;;
+    ee)
+      if [[ -n "$TLS_DOMAIN" ]]; then
+        LINK_SECRET="ee${BOOTSTRAP_SECRET,,}$(domain_to_hex "$TLS_DOMAIN")"
+      else
+        LINK_SECRET="ee${BOOTSTRAP_SECRET,,}"
+      fi
       ;;
     *)
       LINK_SECRET="${BOOTSTRAP_SECRET,,}"
@@ -468,6 +508,9 @@ say "Bot setup: mtproxybot-setup --show | mtproxybot-setup --regen-password --us
 say "API socket: $ADMIN_SOCKET"
 say "API token file: $ADMIN_TOKEN_FILE"
 say "API token: $ADMIN_TOKEN"
+if [[ -n "$TLS_DOMAIN" ]]; then
+  say "TLS cover domain: $TLS_DOMAIN"
+fi
 if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   say "Bot SSH credentials:"
   say "  host=${PUBLIC_HOST:-$(detect_public_host)}"
