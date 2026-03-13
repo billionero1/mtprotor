@@ -20,6 +20,7 @@ DOG_MENU_PATH="/usr/local/bin/dogmenu"
 DOG_CTL_PATH="/usr/local/bin/dogctl"
 DISPATCH_PATH="/usr/local/bin/proxybot-dispatch"
 BOT_SETUP_PATH="/usr/local/bin/mtproxybot-setup"
+ADMIN_TOKEN_FILE="$CONF_DIR/admin.token"
 
 CLIENT_PORT="443"
 STATS_PORT="8888"
@@ -31,7 +32,7 @@ CLEAN_OLD="yes"
 REFRESH_TG_CONFIG="yes"
 BOT_SSH_SETUP="yes"
 BOT_SSH_USER="mtproxybot"
-BOT_SSH_ALLOW_FROM="any"
+BOT_SSH_ALLOW_FROM=""
 BOT_SSH_PASSWORD=""
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -115,6 +116,16 @@ detect_public_host() {
   ip="$(curl -4 -fsSL --max-time 5 https://api.ipify.org || true)"
   if [[ -z "$ip" ]]; then
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  echo "$ip"
+}
+
+detect_ssh_client_ip() {
+  local ip=""
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    ip="$(awk '{print $1}' <<<"$SSH_CONNECTION")"
+  elif [[ -n "${SSH_CLIENT:-}" ]]; then
+    ip="$(awk '{print $1}' <<<"$SSH_CLIENT")"
   fi
   echo "$ip"
 }
@@ -228,6 +239,10 @@ print_logo
 BOOTSTRAP_SECRET="$(rand_bootstrap_secret)"
 ADMIN_TOKEN="$(rand_hex16)$(rand_hex16)"
 PUBLIC_HOST="$(detect_public_host)"
+BOT_SSH_ALLOW_FROM="$(detect_ssh_client_ip)"
+if [[ -z "$BOT_SSH_ALLOW_FROM" ]]; then
+  BOT_SSH_ALLOW_FROM="127.0.0.1"
+fi
 
 say "Installer mode: $([[ $is_interactive -eq 1 ]] && echo interactive || echo non-interactive)"
 
@@ -248,7 +263,10 @@ prompt_yes_no BOT_SSH_SETUP "Configure SSH bot credentials (login/password) now"
 if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   prompt_nonempty BOT_SSH_USER "Bot SSH username" "$BOT_SSH_USER"
   [[ "$BOT_SSH_USER" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]] || die "Invalid bot SSH username"
-  prompt_default BOT_SSH_ALLOW_FROM "Allowed bot source IP/CIDR (any for no restriction)" "$BOT_SSH_ALLOW_FROM"
+  prompt_nonempty BOT_SSH_ALLOW_FROM "Allowed bot source IP/CIDR (required)" "$BOT_SSH_ALLOW_FROM"
+  if [[ "${BOT_SSH_ALLOW_FROM,,}" == "any" ]]; then
+    die "allow-from cannot be 'any' in installer secure mode"
+  fi
   BOT_SSH_PASSWORD="$(rand_password)"
 fi
 
@@ -324,10 +342,16 @@ BOOTSTRAP_SECRET=${BOOTSTRAP_SECRET,,}
 SECRET_PREFIX=$SECRET_PREFIX
 ADMIN_SOCKET=$ADMIN_SOCKET
 STATE_FILE=$STATE_FILE
+ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
 ADMIN_TOKEN=$ADMIN_TOKEN
 ENV
 chown root:mtproxy "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
+
+tmp_admin_token="$(mktemp)"
+printf '%s\n' "$ADMIN_TOKEN" > "$tmp_admin_token"
+install -m 0640 -o root -g mtproxy "$tmp_admin_token" "$ADMIN_TOKEN_FILE"
+rm -f "$tmp_admin_token"
 
 now="$(date +%s)"
 {
@@ -355,11 +379,7 @@ BOT_SETUP_OUTPUT=""
 if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   say "[7.5/9] Configuring bot SSH profile..."
   bot_cmd=("$BOT_SETUP_PATH" --user "$BOT_SSH_USER" --password "$BOT_SSH_PASSWORD")
-  if [[ "${BOT_SSH_ALLOW_FROM,,}" == "any" || -z "$BOT_SSH_ALLOW_FROM" ]]; then
-    bot_cmd+=(--allow-any)
-  else
-    bot_cmd+=(--allow-from "$BOT_SSH_ALLOW_FROM")
-  fi
+  bot_cmd+=(--allow-from "$BOT_SSH_ALLOW_FROM")
   if ! BOT_SETUP_OUTPUT="$("${bot_cmd[@]}")"; then
     die "Failed to configure bot SSH profile"
   fi
@@ -404,6 +424,7 @@ say "Console: dogmenu (compat: mtproxymenu)"
 say "CLI: dogctl runtime status (compat: proxyctl runtime status)"
 say "Bot setup: mtproxybot-setup --show | mtproxybot-setup --regen-password --user mtproxybot"
 say "API socket: $ADMIN_SOCKET"
+say "API token file: $ADMIN_TOKEN_FILE"
 say "API token: $ADMIN_TOKEN"
 if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   say "Bot SSH credentials:"
@@ -411,11 +432,7 @@ if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   say "  port=22"
   say "  username=$BOT_SSH_USER"
   say "  password=$BOT_SSH_PASSWORD"
-  if [[ "${BOT_SSH_ALLOW_FROM,,}" == "any" || -z "$BOT_SSH_ALLOW_FROM" ]]; then
-    say "  allow_from=any"
-  else
-    say "  allow_from=$BOT_SSH_ALLOW_FROM"
-  fi
+  say "  allow_from=$BOT_SSH_ALLOW_FROM"
   say "  check/rotate: proxyctl bot ssh show | proxyctl bot ssh rotate-password --user $BOT_SSH_USER"
 fi
 if [[ -n "$PUBLIC_HOST" ]]; then

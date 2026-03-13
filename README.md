@@ -29,8 +29,8 @@ Installer does:
 3. clone + build fork
 4. runtime user/dirs setup
 5. Telegram config download (`proxy-secret`, `proxy-multi.conf`)
-6. bootstrap secret + admin token setup
-7. auto-generate bot SSH login/password (x3-ui style) + forced-command profile
+6. bootstrap secret + admin token setup (stored in `/etc/mtproxy-fork/admin.token`)
+7. auto-generate bot SSH login/password (x3-ui style) + forced-command profile with required `allow-from`
 8. systemd install/start + expire-sync timer
 9. health checks + ready links
 
@@ -42,6 +42,7 @@ After install:
 - bot SSH dispatcher: `/usr/local/bin/proxybot-dispatch`
 - bot SSH password setup: `/usr/local/bin/mtproxybot-setup`
 - env/config: `/etc/default/mtproxy-fork`
+- admin token file: `/etc/mtproxy-fork/admin.token`
 - secrets state: `/var/lib/mtproxy-fork/secrets.tsv`
 - bot credentials cache: `/etc/mtproxy-fork/bot-access.env`
 - expire timer: `mtproxy-fork-expire-sync.timer` (disables expired users)
@@ -175,7 +176,6 @@ Manage SSH bot credentials later:
 ```bash
 proxyctl bot ssh show
 proxyctl bot ssh rotate-password --user mtproxybot --allow-from <BOT_SERVER_IP>
-proxyctl bot ssh allow-from --user mtproxybot --allow-any
 proxyctl bot ssh set --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
 ```
 
@@ -206,7 +206,7 @@ Full bot template:
 Socket path (default): `/var/lib/mtproxy-fork/admin.sock`
 
 Auth:
-- `X-Admin-Token: <token>`
+- `X-Admin-Token: <token>` (runtime reads token from `/etc/mtproxy-fork/admin.token`, not from process argv)
 
 Endpoints:
 - `GET /v1/status`
@@ -221,7 +221,7 @@ Legacy line-protocol includes: `PING`, `STATUS`, `LIST`, `ADD`, `REMOVE`, `ENABL
 
 Accepted secret formats:
 - plain: `<32 hex>`
-- dd: `dd<32 hex>`
+- dd: `dd<32 hex>[optional hex suffix]`
 - ee/tls-like: `ee<32 hex>[optional hex suffix]`
 
 ## Hot Reload Behavior

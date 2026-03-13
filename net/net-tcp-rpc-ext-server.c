@@ -221,9 +221,20 @@ static int ext_secret16_from_hex (const char *hex, unsigned char out[16]) {
     return ext_hex16_to_secret (hex, out);
   }
 
-  // dd + 16-byte secret: random-padding mode link secret.
-  if (n == 34 && !strncasecmp (hex, "dd", 2)) {
-    return ext_hex16_to_secret (hex + 2, out);
+  // dd + 16-byte secret (+ optional hex suffix): random-padding mode link secret.
+  if (n >= 34 && !strncasecmp (hex, "dd", 2)) {
+    if (ext_hex16_to_secret (hex + 2, out) < 0) {
+      return -1;
+    }
+    if (((n - 34) & 1) != 0) {
+      return -1;
+    }
+    for (i = 34; i < n; i++) {
+      if (!isxdigit ((unsigned char) hex[i])) {
+        return -1;
+      }
+    }
+    return 0;
   }
 
   // ee + 16-byte secret (+ optional hex suffix): TLS-like mode link secret.

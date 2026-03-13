@@ -2078,10 +2078,46 @@ int http_sfd[MAX_HTTP_LISTEN_PORTS], http_port[MAX_HTTP_LISTEN_PORTS];
 static int domain_count;
 static char *hot_admin_socket;
 static char *hot_admin_token;
+static char *hot_admin_token_file;
 static char *hot_secrets_state_file;
 
 // static double next_create_outbound;
 // int outbound_connections_per_second = DEFAULT_OUTBOUND_CONNECTION_CREATION_RATE;
+
+static char *load_admin_token_from_file (const char *path) {
+  if (!path || !*path) {
+    return NULL;
+  }
+  FILE *f = fopen (path, "r");
+  if (!f) {
+    kprintf ("cannot open admin token file %s: %m\n", path);
+    return NULL;
+  }
+  char buf[512];
+  size_t n = fread (buf, 1, sizeof (buf) - 1, f);
+  if (ferror (f)) {
+    kprintf ("cannot read admin token file %s: %m\n", path);
+    fclose (f);
+    return NULL;
+  }
+  if (n == sizeof (buf) - 1 && !feof (f)) {
+    kprintf ("admin token file %s is too large (max 511 bytes)\n", path);
+    fclose (f);
+    return NULL;
+  }
+  fclose (f);
+  buf[n] = 0;
+
+  char *start = buf;
+  while (*start && isspace ((unsigned char) *start)) {
+    start++;
+  }
+  char *end = start + strlen (start);
+  while (end > start && isspace ((unsigned char) end[-1])) {
+    *--end = 0;
+  }
+  return strdup (start);
+}
 
 void mtfront_pre_loop (void) {
   int i, enable_ipv6 = engine_check_ipv6_enabled () ? SM_IPV6 : 0;
@@ -2203,6 +2239,9 @@ int f_parse_option (int val) {
   case 2012:
     hot_admin_token = strdup (optarg);
     break;
+  case 2013:
+    hot_admin_token_file = strdup (optarg);
+    break;
   case 'D':
     tcp_rpc_add_proxy_domain (optarg);
     domain_count++;
@@ -2253,6 +2292,7 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("admin-socket", required_argument, 0, 2010, "hot-reload admin unix socket path");
   parse_option ("secrets-state", required_argument, 0, 2011, "hot-reload secrets state file path");
   parse_option ("admin-token", required_argument, 0, 2012, "token for admin socket commands (optional)");
+  parse_option ("admin-token-file", required_argument, 0, 2013, "path to file with admin token; preferred over --admin-token");
   parse_option ("mtproto-secret", required_argument, 0, 'S', "16-byte secret in hex mode");
   parse_option ("proxy-tag", required_argument, 0, 'P', "16-byte proxy tag in hex mode to be passed along with all forwarded queries");
   parse_option ("domain", required_argument, 0, 'D', "adds allowed domain for TLS-transport mode, disables other transports; can be specified more than once");
@@ -2293,6 +2333,15 @@ void mtfront_pre_init (void) {
 
   if (hot_admin_socket && !hot_secrets_state_file) {
     hot_secrets_state_file = "/var/lib/mtproto-proxy/secrets.tsv";
+  }
+  if (hot_admin_token_file) {
+    char *token = load_admin_token_from_file (hot_admin_token_file);
+    if (!token) {
+      kprintf ("cannot load admin token from file %s\n", hot_admin_token_file);
+      exit (1);
+    }
+    free (hot_admin_token);
+    hot_admin_token = token;
   }
   if (hot_secrets_state_file) {
     tcp_rpcs_set_secrets_state_file (hot_secrets_state_file);

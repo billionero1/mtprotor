@@ -20,6 +20,7 @@ load_env() {
   : "${ADMIN_SOCKET:=/var/lib/mtproxy-fork/admin.sock}"
   : "${STATE_FILE:=/var/lib/mtproxy-fork/secrets.tsv}"
   : "${ADMIN_TOKEN:=}"
+  : "${ADMIN_TOKEN_FILE:=/etc/mtproxy-fork/admin.token}"
 }
 
 load_env
@@ -360,6 +361,17 @@ update_env_key() {
   rm -f "$tmp"
 }
 
+write_admin_token_file() {
+  local token="$1"
+  local dir tmp
+  dir="$(dirname "$ADMIN_TOKEN_FILE")"
+  install -d -m 0750 -o root -g mtproxy "$dir" 2>/dev/null || mkdir -p "$dir"
+  tmp="$(mktemp)"
+  printf '%s\n' "$token" > "$tmp"
+  install -m 0640 -o root -g mtproxy "$tmp" "$ADMIN_TOKEN_FILE" 2>/dev/null || install -m 0600 "$tmp" "$ADMIN_TOKEN_FILE"
+  rm -f "$tmp"
+}
+
 link_secret() {
   local sec="$1"
   local pref="${2:-$SECRET_PREFIX}"
@@ -510,6 +522,7 @@ BOOTSTRAP_SECRET=$BOOTSTRAP_SECRET
 SECRET_PREFIX=$SECRET_PREFIX
 ADMIN_SOCKET=$ADMIN_SOCKET
 STATE_FILE=$STATE_FILE
+ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
 ADMIN_TOKEN=${ADMIN_TOKEN:0:8}...
 CFG
   echo "Default links:"
@@ -559,10 +572,13 @@ cmd_config_set() {
       ;;
     admin-token)
       update_env_key ADMIN_TOKEN "$val"
+      if ! write_admin_token_file "$val"; then
+        die "failed to write admin token file: $ADMIN_TOKEN_FILE"
+      fi
       ADMIN_TOKEN="$val"
       TOKEN="$val"
       systemctl restart "$SERVICE_NAME.service"
-      echo "admin-token updated and service restarted"
+      echo "admin-token updated, token file refreshed, service restarted"
       ;;
     bootstrap-secret)
       require_hex32 "$val" || die "bootstrap-secret must be 32 hex chars"
