@@ -6,6 +6,7 @@ UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
+DISPATCH_PATH="/usr/local/bin/proxybot-dispatch"
 CONF_DIR="/etc/mtproxy-fork"
 DATA_DIR="/var/lib/mtproxy-fork"
 ENV_FILE="/etc/default/mtproxy-fork"
@@ -35,7 +36,7 @@ systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
 rm -f "$UNIT_FILE"
 systemctl daemon-reload
 
-rm -f "$BIN_PATH" "$CTL_PATH" "$MENU_PATH"
+rm -f "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DISPATCH_PATH"
 
 if (( PURGE_DATA )); then
   rm -rf "$CONF_DIR" "$DATA_DIR" "$ENV_FILE"

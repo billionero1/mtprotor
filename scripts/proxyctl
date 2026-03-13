@@ -23,6 +23,7 @@ load_env
 
 SOCK="${MTPROXY_SOCKET:-$ADMIN_SOCKET}"
 TOKEN="${MTPROXY_TOKEN:-$ADMIN_TOKEN}"
+BOT_MODE=0
 
 usage() {
   cat <<USAGE
@@ -31,7 +32,8 @@ Usage:
   proxyctl health
   proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd]
 
-  proxyctl service status|start|stop|restart|logs
+  proxyctl service status [--full|--json]
+  proxyctl service start|stop|restart|logs
   proxyctl config show
   proxyctl config set client-port <1..65535>
   proxyctl config set stats-port <1..65535>
@@ -47,6 +49,12 @@ Usage:
   proxyctl secret enable <secret>
   proxyctl secret disable <secret>
 
+  proxyctl bot health
+  proxyctl bot issue <label> [--days <n>]
+  proxyctl bot disable <secret>
+  proxyctl bot enable <secret>
+  proxyctl bot revoke <secret>
+
   proxyctl menu
 
 Env overrides:
@@ -61,7 +69,11 @@ warn() {
 }
 
 die() {
-  echo "[ERROR] $*" >&2
+  if (( BOT_MODE )); then
+    printf '{"ok":false,"error":"%s"}\n' "$(json_escape "$*")"
+  else
+    echo "[ERROR] $*" >&2
+  fi
   exit 1
 }
 
@@ -132,9 +144,23 @@ api() {
 
 service_cmd() {
   local action="$1"
+  local mode="${2:-}"
   case "$action" in
     status)
-      systemctl --no-pager --full status "$SERVICE_NAME.service"
+      case "$mode" in
+        --full)
+          systemctl --no-pager --full status "$SERVICE_NAME.service"
+          ;;
+        --json)
+          print_service_summary_json
+          ;;
+        "")
+          print_service_summary
+          ;;
+        *)
+          die "Unknown option for service status: $mode"
+          ;;
+      esac
       ;;
     start|stop|restart)
       require_root
@@ -190,6 +216,69 @@ show_links() {
   secret_out="$(link_secret "$sec" "$pref")"
   echo "https://t.me/proxy?server=${host}&port=${port}&secret=${secret_out}"
   echo "tg://proxy?server=${host}&port=${port}&secret=${secret_out}"
+}
+
+fmt_bytes() {
+  local b="${1:-0}"
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --to=iec-i --suffix=B "$b" 2>/dev/null || echo "${b}B"
+  else
+    echo "${b}B"
+  fi
+}
+
+fmt_cpu_nsec() {
+  local ns="${1:-0}"
+  awk -v n="$ns" 'BEGIN { printf "%.2fs", (n/1000000000.0) }'
+}
+
+collect_service_snapshot() {
+  local status_json
+  local active substate pid start_ts mem cpu total active_secrets listen host
+  active="$(systemctl show -p ActiveState --value "$SERVICE_NAME.service" 2>/dev/null || echo unknown)"
+  substate="$(systemctl show -p SubState --value "$SERVICE_NAME.service" 2>/dev/null || echo unknown)"
+  pid="$(systemctl show -p MainPID --value "$SERVICE_NAME.service" 2>/dev/null || echo 0)"
+  start_ts="$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE_NAME.service" 2>/dev/null || echo unknown)"
+  mem="$(systemctl show -p MemoryCurrent --value "$SERVICE_NAME.service" 2>/dev/null || echo 0)"
+  cpu="$(systemctl show -p CPUUsageNSec --value "$SERVICE_NAME.service" 2>/dev/null || echo 0)"
+  listen="no"
+  if ss -ltn | awk '{print $4}' | grep -qE "(^|:)${CLIENT_PORT}$"; then
+    listen="yes"
+  fi
+  host="${PUBLIC_HOST:-$(detect_public_host)}"
+  total=0
+  active_secrets=0
+  if [[ -S "$SOCK" ]]; then
+    status_json="$(request GET /v1/status 2>/dev/null || true)"
+    total="$(echo "$status_json" | sed -n 's/.*\"total\":\\([0-9][0-9]*\\).*/\\1/p')"
+    active_secrets="$(echo "$status_json" | sed -n 's/.*\"active\":\\([0-9][0-9]*\\).*/\\1/p')"
+    [[ -n "$total" ]] || total=0
+    [[ -n "$active_secrets" ]] || active_secrets=0
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$active" "$substate" "$pid" "$start_ts" "$mem" "$cpu" "$listen" "$host" "$total" "$active_secrets"
+}
+
+print_service_summary() {
+  local snap active substate pid start_ts mem cpu listen host total active_secrets
+  snap="$(collect_service_snapshot)"
+  IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
+  echo "Service      : $SERVICE_NAME ($active/$substate)"
+  echo "Main PID     : $pid"
+  echo "Started      : $start_ts"
+  echo "Memory       : $(fmt_bytes "$mem")"
+  echo "CPU time     : $(fmt_cpu_nsec "$cpu")"
+  echo "Client port  : $CLIENT_PORT (listening: $listen)"
+  echo "Public host  : ${host:-unknown}"
+  echo "Secrets      : total=$total active=$active_secrets"
+}
+
+print_service_summary_json() {
+  local snap active substate pid start_ts mem cpu listen host total active_secrets
+  snap="$(collect_service_snapshot)"
+  IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
+  printf '{\"service\":\"%s\",\"active\":\"%s\",\"substate\":\"%s\",\"pid\":%s,\"started\":\"%s\",\"memory_bytes\":%s,\"cpu_nsec\":%s,\"client_port\":%s,\"listening\":\"%s\",\"public_host\":\"%s\",\"secrets_total\":%s,\"secrets_active\":%s}\n' \
+    "$SERVICE_NAME" "$active" "$substate" "$pid" "$(json_escape "$start_ts")" "$mem" "$cpu" "$CLIENT_PORT" "$listen" "$(json_escape "$host")" "$total" "$active_secrets"
 }
 
 cmd_status() {
@@ -449,6 +538,40 @@ cmd_secret() {
   esac
 }
 
+cmd_bot() {
+  BOT_MODE=1
+  local sub="${1:-}"
+  case "$sub" in
+    health)
+      cmd_health
+      ;;
+    issue)
+      local label="${2:-}"
+      [[ -n "$label" ]] || die "Usage: proxyctl bot issue <label> [--days N]"
+      shift 2
+      cmd_secret_issue "$label" "$@"
+      ;;
+    disable)
+      local secd="${2:-}"
+      [[ -n "$secd" ]] || die "Usage: proxyctl bot disable <secret>"
+      api PATCH "/v1/secrets/$secd/disable"
+      ;;
+    enable)
+      local sece="${2:-}"
+      [[ -n "$sece" ]] || die "Usage: proxyctl bot enable <secret>"
+      api PATCH "/v1/secrets/$sece/enable"
+      ;;
+    revoke|remove)
+      local secr="${2:-}"
+      [[ -n "$secr" ]] || die "Usage: proxyctl bot revoke <secret>"
+      api DELETE "/v1/secrets/$secr"
+      ;;
+    *)
+      die "Unknown bot action: $sub"
+      ;;
+  esac
+}
+
 run_safe() {
   if ! "$@"; then
     warn "Command failed: $*"
@@ -456,37 +579,42 @@ run_safe() {
 }
 
 menu_header() {
+  local snap active substate pid start_ts mem cpu listen host total active_secrets
+  snap="$(collect_service_snapshot)"
+  IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
   echo
-  echo "========== MTProxy Control Menu =========="
-  echo "Service : $SERVICE_NAME"
-  echo "Host    : ${PUBLIC_HOST:-$(detect_public_host)}"
-  echo "Port    : $CLIENT_PORT"
-  echo "------------------------------------------"
+  echo "============== Bulldog MTProxy Menu =============="
+  echo "Service   : $SERVICE_NAME ($active/$substate)  PID: $pid"
+  echo "Client    : ${host:-unknown}:$CLIENT_PORT  listening: $listen"
+  echo "Secrets   : total=$total active=$active_secrets"
+  echo "Started   : $start_ts"
+  echo "=================================================="
 }
 
 menu_cmd() {
   while true; do
     menu_header
-    echo "1) Service status"
-    echo "2) Health check"
+    echo "1) Quick service summary"
+    echo "2) Health check (JSON)"
     echo "3) Show default links"
-    echo "4) List users (secrets)"
+    echo "4) List users (JSON)"
     echo "5) Issue new user (secret + link)"
     echo "6) Disable user"
     echo "7) Enable user"
     echo "8) Remove user"
-    echo "9) Change client port (restart service)"
+    echo "9) Change client port (restart)"
     echo "10) Change bootstrap secret"
     echo "11) Change public host"
     echo "12) Restart service"
-    echo "13) Show service logs"
+    echo "13) Show service logs (last 120)"
+    echo "14) Full systemd status"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
 
     case "$choice" in
       1)
-        run_safe service_cmd status
+        run_safe print_service_summary
         ;;
       2)
         run_safe cmd_health
@@ -545,6 +673,9 @@ menu_cmd() {
       13)
         run_safe service_cmd logs
         ;;
+      14)
+        run_safe service_cmd status --full
+        ;;
       0)
         exit 0
         ;;
@@ -573,8 +704,9 @@ case "$cmd" in
     ;;
   service)
     sub="${2:-}"
-    [[ -n "$sub" ]] || die "Usage: proxyctl service status|start|stop|restart|logs"
-    service_cmd "$sub"
+    [[ -n "$sub" ]] || die "Usage: proxyctl service status [--full|--json] | start|stop|restart|logs"
+    opt="${3:-}"
+    service_cmd "$sub" "$opt"
     ;;
   config)
     sub="${2:-}"
@@ -594,6 +726,10 @@ case "$cmd" in
   secret)
     shift
     cmd_secret "$@"
+    ;;
+  bot)
+    shift
+    cmd_bot "$@"
     ;;
   menu)
     menu_cmd

@@ -14,6 +14,7 @@ UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
+DISPATCH_PATH="/usr/local/bin/proxybot-dispatch"
 
 CLIENT_PORT="443"
 STATS_PORT="8888"
@@ -239,7 +240,7 @@ cleanup_old() {
   rm -f "$UNIT_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
-  rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH"
+  rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DISPATCH_PATH"
   systemctl daemon-reload || true
 }
 
@@ -314,6 +315,7 @@ chmod 0640 "$STATE_FILE"
 
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
 install -m 0755 "$INSTALL_DIR/scripts/proxyctl" "$CTL_PATH"
+install -m 0755 "$INSTALL_DIR/scripts/proxybot-dispatch" "$DISPATCH_PATH"
 cat > "$MENU_PATH" <<'MENU'
 #!/usr/bin/env bash
 exec /usr/local/bin/proxyctl menu "$@"

@@ -38,6 +38,7 @@ After install:
 - binary: `/usr/local/bin/mtproto-proxy-fork`
 - CLI: `/usr/local/bin/proxyctl`
 - menu: `/usr/local/bin/mtproxymenu`
+- bot SSH dispatcher: `/usr/local/bin/proxybot-dispatch`
 - env/config: `/etc/default/mtproxy-fork`
 - secrets state: `/var/lib/mtproxy-fork/secrets.tsv`
 
@@ -62,6 +63,8 @@ Optional flags:
 ### Service
 ```bash
 proxyctl service status
+proxyctl service status --full
+proxyctl service status --json
 proxyctl service restart
 proxyctl service logs
 proxyctl health
@@ -131,14 +134,14 @@ Notes:
 - Bootstrap secret change is applied via runtime API and persisted.
 
 ## External Control for Bot (from another server)
-Recommended production method: **SSH to proxy server and run `proxyctl`**.
+Recommended production method: **SSH to proxy server and run `proxyctl bot ...`**.
 
 Examples:
 ```bash
-ssh bulldogtg1 "proxyctl health"
-ssh bulldogtg1 "proxyctl secret issue user_987 --days 30"
-ssh bulldogtg1 "proxyctl secret disable <hex32>"
-ssh bulldogtg1 "proxyctl secret remove <hex32>"
+ssh bulldogtg1 "proxyctl bot health"
+ssh bulldogtg1 "proxyctl bot issue user_987 --days 30"
+ssh bulldogtg1 "proxyctl bot disable <hex32>"
+ssh bulldogtg1 "proxyctl bot revoke <hex32>"
 ```
 
 This gives full lifecycle control for subscriptions:
@@ -151,6 +154,10 @@ This gives full lifecycle control for subscriptions:
 - Restrict source IPs in firewall.
 - Prefer dedicated low-privilege account with limited sudo rule for `proxyctl` if needed.
 - Keep admin API on Unix socket local-only (default). Do not expose to internet.
+- Use forced command mode with `proxybot-dispatch` (no shell, no port forwarding).
+
+Full bot template:
+- `docs/BOT_INTEGRATION_TEMPLATE.md`
 
 ## Local Admin API
 Socket path (default): `/var/lib/mtproxy-fork/admin.sock`
@@ -195,4 +202,3 @@ Installed unit:
 ## Current Limitation (Planned v2)
 `--slaves` + hot reload is not enabled yet. Planned next stage:
 - inter-process sync/shared state for multi-process hot reload.
-

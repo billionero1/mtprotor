@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<USAGE
+Allowed commands:
+  health
+  issue <label> [--days N]
+  disable <secret_hex32>
+  enable <secret_hex32>
+  revoke <secret_hex32>
+USAGE
+}
+
+die() {
+  printf '{"ok":false,"error":"%s"}\n' "$1"
+  exit 1
+}
+
+cmdline="${SSH_ORIGINAL_COMMAND:-}"
+if [[ -z "$cmdline" ]]; then
+  usage
+  exit 1
+fi
+
+read -r -a argv <<<"$cmdline"
+[[ ${#argv[@]} -gt 0 ]] || die "empty command"
+
+cmd="${argv[0]}"
+case "$cmd" in
+  health)
+    exec /usr/local/bin/proxyctl bot health
+    ;;
+
+  issue)
+    [[ ${#argv[@]} -ge 2 ]] || die "label is required"
+    label="${argv[1]}"
+    [[ "$label" =~ ^[A-Za-z0-9._:-]{1,80}$ ]] || die "invalid label"
+    if [[ ${#argv[@]} -eq 2 ]]; then
+      exec /usr/local/bin/proxyctl bot issue "$label"
+    fi
+    if [[ ${#argv[@]} -eq 4 && "${argv[2]}" == "--days" && "${argv[3]}" =~ ^[0-9]+$ ]]; then
+      exec /usr/local/bin/proxyctl bot issue "$label" --days "${argv[3]}"
+    fi
+    die "invalid issue arguments"
+    ;;
+
+  disable|enable|revoke)
+    [[ ${#argv[@]} -eq 2 ]] || die "secret is required"
+    secret="${argv[1]}"
+    [[ "$secret" =~ ^[0-9a-fA-F]{32}$ ]] || die "secret must be hex32"
+    exec /usr/local/bin/proxyctl bot "$cmd" "${secret,,}"
+    ;;
+
+  *)
+    die "unknown command"
+    ;;
+esac
