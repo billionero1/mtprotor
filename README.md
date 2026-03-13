@@ -69,9 +69,11 @@ Optional flags:
 dogctl runtime status
 dogctl runtime restart
 dogctl runtime logs
+dogctl runtime logs-live
 proxyctl runtime status
 proxyctl runtime restart
 proxyctl runtime logs
+proxyctl runtime logs-live
 proxyctl service status
 proxyctl service status --full
 proxyctl service status --json
@@ -124,6 +126,7 @@ dogctl console
 
 Menu includes:
 - runtime status/health/logs
+- runtime logs in real time (`journalctl -f` style)
 - default links
 - list users (table: active/expired/disabled + active_until)
 - issue/disable/enable/remove user

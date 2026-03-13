@@ -29,6 +29,7 @@ TOKEN="${MTPROXY_TOKEN:-$ADMIN_TOKEN}"
 BOT_MODE=0
 BOT_SETUP_BIN="${MTPROXY_BOT_SETUP_BIN:-/usr/local/bin/mtproxybot-setup}"
 BOT_CRED_FILE="${MTPROXY_BOT_CRED_FILE:-/etc/mtproxy-fork/bot-access.env}"
+LOG_TAG="${MTPROXY_LOG_TAG:-dogctl}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'
@@ -80,9 +81,9 @@ Usage:
   proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd]
 
   proxyctl runtime status [--full|--json]
-  proxyctl runtime start|stop|restart|logs
+  proxyctl runtime start|stop|restart|logs|logs-live
   proxyctl service status [--full|--json]
-  proxyctl service start|stop|restart|logs
+  proxyctl service start|stop|restart|logs|logs-live
   proxyctl config show
   proxyctl config set client-port <1..65535>
   proxyctl config set stats-port <1..65535>
@@ -125,16 +126,27 @@ USAGE
 }
 
 warn() {
+  audit_log warn "$*"
   echo "$(paint "$C_YELLOW" "[WARN]") $*" >&2
 }
 
 die() {
+  audit_log error "$*"
   if (( BOT_MODE )); then
     printf '{"ok":false,"error":"%s"}\n' "$(json_escape "$*")"
   else
     echo "$(paint "$C_RED" "[ERROR]") $*" >&2
   fi
   exit 1
+}
+
+audit_log() {
+  local level="$1"
+  shift || true
+  local msg="$*"
+  if command -v logger >/dev/null 2>&1; then
+    logger -t "$LOG_TAG" "level=${level} ${msg}"
+  fi
 }
 
 require_root() {
@@ -200,6 +212,27 @@ api() {
   ensure_socket
   request "$@"
   echo
+}
+
+json_is_ok() {
+  [[ "${1:-}" == *'"ok":true'* ]]
+}
+
+api_call_with_log() {
+  local method="$1"
+  local path="$2"
+  local data="${3:-}"
+  local ok_msg="${4:-}"
+  local fail_msg="${5:-}"
+  local resp
+  ensure_socket
+  resp="$(request "$method" "$path" "$data")"
+  echo "$resp"
+  if json_is_ok "$resp"; then
+    [[ -n "$ok_msg" ]] && audit_log info "$ok_msg"
+  else
+    [[ -n "$fail_msg" ]] && audit_log warn "$fail_msg response=$(echo "$resp" | tr -d '\n')"
+  fi
 }
 
 iso_utc_from_unix() {
@@ -293,7 +326,10 @@ service_cmd() {
       systemctl "$action" "$SERVICE_NAME.service"
       ;;
     logs)
-      journalctl -u "$SERVICE_NAME.service" --no-pager -n 120
+      journalctl -u "$SERVICE_NAME.service" -u mtproxy-fork-expire-sync.service -t "$LOG_TAG" --no-pager -n 120
+      ;;
+    logs-live|logs-follow)
+      journalctl -u "$SERVICE_NAME.service" -u mtproxy-fork-expire-sync.service -t "$LOG_TAG" -f -n 60 --output=short-iso --no-hostname
       ;;
     *)
       die "Unknown service action: $action"
@@ -618,6 +654,7 @@ cmd_secret_expire_disable() {
       if [[ "$enabled" == "true" && "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 && now >= expires )); then
         if request PATCH "/v1/secrets/$secret/disable" >/dev/null 2>&1; then
           (( disabled += 1 ))
+          audit_log info "secret_disable_expired secret=$secret expires=$expires"
         fi
       fi
     done <<<"$rows"
@@ -651,7 +688,9 @@ cmd_secret_add() {
 
   local payload
   payload="{\"secret\":\"$(json_escape "$secret")\",\"label\":\"$(json_escape "$label")\",\"expires\":$expires,\"enabled\":$enabled}"
-  api POST /v1/secrets "$payload"
+  api_call_with_log POST /v1/secrets "$payload" \
+    "secret_add secret=$secret label=$label expires=$expires enabled=$enabled" \
+    "secret_add_failed secret=$secret label=$label"
 }
 
 cmd_secret_issue() {
@@ -697,6 +736,7 @@ cmd_secret_issue() {
 
   printf '{"ok":true,"secret":"%s","expires":%s,"active_until":"%s","link":"https://t.me/proxy?server=%s&port=%s&secret=%s"}\n' \
     "$secret" "$expires" "$active_until" "$host" "$CLIENT_PORT" "$out_secret"
+  audit_log info "secret_issue secret=$secret label=$label expires=$expires prefix=$prefix"
 }
 
 cmd_secret() {
@@ -725,17 +765,23 @@ cmd_secret() {
     remove)
       local secret_rm="${2:-}"
       [[ -n "$secret_rm" ]] || die "Usage: proxyctl secret remove <secret>"
-      api DELETE "/v1/secrets/$secret_rm"
+      api_call_with_log DELETE "/v1/secrets/$secret_rm" "" \
+        "secret_remove secret=$secret_rm" \
+        "secret_remove_failed secret=$secret_rm"
       ;;
     enable)
       local secret_en="${2:-}"
       [[ -n "$secret_en" ]] || die "Usage: proxyctl secret enable <secret>"
-      api PATCH "/v1/secrets/$secret_en/enable"
+      api_call_with_log PATCH "/v1/secrets/$secret_en/enable" "" \
+        "secret_enable secret=$secret_en" \
+        "secret_enable_failed secret=$secret_en"
       ;;
     disable)
       local secret_dis="${2:-}"
       [[ -n "$secret_dis" ]] || die "Usage: proxyctl secret disable <secret>"
-      api PATCH "/v1/secrets/$secret_dis/disable"
+      api_call_with_log PATCH "/v1/secrets/$secret_dis/disable" "" \
+        "secret_disable secret=$secret_dis" \
+        "secret_disable_failed secret=$secret_dis"
       ;;
     expire-disable|sync-expired)
       cmd_secret_expire_disable
@@ -749,6 +795,7 @@ cmd_secret() {
 cmd_bot_ssh() {
   local sub="${1:-}"
   shift || true
+  local resp=""
   case "$sub" in
     show)
       BOT_MODE=0
@@ -756,15 +803,33 @@ cmd_bot_ssh() {
       ;;
     rotate-password)
       BOT_MODE=0
-      bot_setup_exec --regen-password "$@"
+      resp="$(bot_setup_exec --regen-password "$@")"
+      echo "$resp"
+      if json_is_ok "$resp"; then
+        audit_log info "bot_ssh_rotate_password args=$*"
+      else
+        audit_log warn "bot_ssh_rotate_password_failed args=$* response=$(echo "$resp" | tr -d '\n')"
+      fi
       ;;
     set)
       BOT_MODE=0
-      bot_setup_exec "$@"
+      resp="$(bot_setup_exec "$@")"
+      echo "$resp"
+      if json_is_ok "$resp"; then
+        audit_log info "bot_ssh_set args=$*"
+      else
+        audit_log warn "bot_ssh_set_failed args=$* response=$(echo "$resp" | tr -d '\n')"
+      fi
       ;;
     allow-from)
       BOT_MODE=0
-      bot_setup_exec --keep-password "$@"
+      resp="$(bot_setup_exec --keep-password "$@")"
+      echo "$resp"
+      if json_is_ok "$resp"; then
+        audit_log info "bot_ssh_allow_from args=$*"
+      else
+        audit_log warn "bot_ssh_allow_from_failed args=$* response=$(echo "$resp" | tr -d '\n')"
+      fi
       ;;
     *)
       die "Usage: proxyctl bot ssh show | rotate-password [opts] | set <opts> | allow-from <opts>"
@@ -788,17 +853,23 @@ cmd_bot() {
     disable)
       local secd="${2:-}"
       [[ -n "$secd" ]] || die "Usage: proxyctl bot disable <secret>"
-      api PATCH "/v1/secrets/$secd/disable"
+      api_call_with_log PATCH "/v1/secrets/$secd/disable" "" \
+        "bot_secret_disable secret=$secd" \
+        "bot_secret_disable_failed secret=$secd"
       ;;
     enable)
       local sece="${2:-}"
       [[ -n "$sece" ]] || die "Usage: proxyctl bot enable <secret>"
-      api PATCH "/v1/secrets/$sece/enable"
+      api_call_with_log PATCH "/v1/secrets/$sece/enable" "" \
+        "bot_secret_enable secret=$sece" \
+        "bot_secret_enable_failed secret=$sece"
       ;;
     revoke|remove)
       local secr="${2:-}"
       [[ -n "$secr" ]] || die "Usage: proxyctl bot revoke <secret>"
-      api DELETE "/v1/secrets/$secr"
+      api_call_with_log DELETE "/v1/secrets/$secr" "" \
+        "bot_secret_revoke secret=$secr" \
+        "bot_secret_revoke_failed secret=$secr"
       ;;
     ssh)
       BOT_MODE=0
@@ -928,26 +999,27 @@ menu_cmd() {
     echo "[Runtime]"
     echo "1) Runtime overview"
     echo "2) Health probe (JSON)"
-    echo "12) Restart runtime"
-    echo "14) Full systemd runtime status"
-    echo "13) Runtime logs (last 120)"
+    echo "3) Restart runtime"
+    echo "4) Full systemd runtime status"
+    echo "5) Runtime logs (last 120)"
+    echo "6) Runtime logs (live)"
     echo
     echo "[Client Access]"
-    echo "3) Show default client links"
-    echo "9) Change client port (restart)"
-    echo "10) Rotate bootstrap secret"
-    echo "11) Change public host"
+    echo "7) Show default client links"
+    echo "8) Change client port (restart)"
+    echo "9) Rotate bootstrap secret"
+    echo "10) Change public host"
     echo
     echo "[Users / Subscriptions]"
-    echo "4) List users (table)"
-    echo "5) Issue user access (secret + link)"
-    echo "6) Suspend user access"
-    echo "7) Resume user access"
-    echo "8) Revoke user access"
+    echo "11) List users (table)"
+    echo "12) Issue user access (secret + link)"
+    echo "13) Suspend user access"
+    echo "14) Resume user access"
+    echo "15) Revoke user access"
     echo "16) Sync expired users -> disabled"
     echo
     echo "[Bot Integration]"
-    echo "15) Bot SSH settings (login/password/allow-from)"
+    echo "17) Bot SSH settings (login/password/allow-from)"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
@@ -960,12 +1032,39 @@ menu_cmd() {
         run_safe cmd_health
         ;;
       3)
-        run_safe cmd_link
+        run_safe service_cmd restart
         ;;
       4)
-        run_safe cmd_secret list --table
+        run_safe service_cmd status --full
         ;;
       5)
+        run_safe service_cmd logs
+        ;;
+      6)
+        run_safe service_cmd logs-live
+        ;;
+      7)
+        run_safe cmd_link
+        ;;
+      8)
+        printf "New client port: "
+        IFS= read -r newport || true
+        [[ -n "$newport" ]] && run_safe cmd_config_set client-port "$newport"
+        ;;
+      9)
+        printf "New bootstrap secret (32 hex): "
+        IFS= read -r news || true
+        [[ -n "$news" ]] && run_safe cmd_config_set bootstrap-secret "$news"
+        ;;
+      10)
+        printf "New public host/IP: "
+        IFS= read -r newhost || true
+        [[ -n "$newhost" ]] && run_safe cmd_config_set public-host "$newhost"
+        ;;
+      11)
+        run_safe cmd_secret list --table
+        ;;
+      12)
         printf "Label: "
         IFS= read -r label || true
         [[ -n "$label" ]] || { warn "label is required"; continue; }
@@ -977,50 +1076,26 @@ menu_cmd() {
           run_safe cmd_secret issue "$label"
         fi
         ;;
-      6)
+      13)
         printf "Secret to suspend: "
         IFS= read -r secd || true
         [[ -n "$secd" ]] && run_safe cmd_secret disable "$secd"
         ;;
-      7)
+      14)
         printf "Secret to resume: "
         IFS= read -r sece || true
         [[ -n "$sece" ]] && run_safe cmd_secret enable "$sece"
         ;;
-      8)
+      15)
         printf "Secret to revoke/remove: "
         IFS= read -r secr || true
         [[ -n "$secr" ]] && run_safe cmd_secret remove "$secr"
         ;;
-      9)
-        printf "New client port: "
-        IFS= read -r newport || true
-        [[ -n "$newport" ]] && run_safe cmd_config_set client-port "$newport"
-        ;;
-      10)
-        printf "New bootstrap secret (32 hex): "
-        IFS= read -r news || true
-        [[ -n "$news" ]] && run_safe cmd_config_set bootstrap-secret "$news"
-        ;;
-      11)
-        printf "New public host/IP: "
-        IFS= read -r newhost || true
-        [[ -n "$newhost" ]] && run_safe cmd_config_set public-host "$newhost"
-        ;;
-      12)
-        run_safe service_cmd restart
-        ;;
-      13)
-        run_safe service_cmd logs
-        ;;
-      14)
-        run_safe service_cmd status --full
-        ;;
-      15)
-        run_safe menu_bot_settings
-        ;;
       16)
         run_safe cmd_secret expire-disable
+        ;;
+      17)
+        run_safe menu_bot_settings
         ;;
       0)
         exit 0
@@ -1050,7 +1125,7 @@ case "$cmd" in
     ;;
   service|runtime)
     sub="${2:-}"
-    [[ -n "$sub" ]] || die "Usage: proxyctl runtime status [--full|--json] | start|stop|restart|logs"
+    [[ -n "$sub" ]] || die "Usage: proxyctl runtime status [--full|--json] | start|stop|restart|logs|logs-live"
     opt="${3:-}"
     service_cmd "$sub" "$opt"
     ;;
