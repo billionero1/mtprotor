@@ -81,6 +81,17 @@ rand_hex16() {
   od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
 }
 
+rand_bootstrap_secret() {
+  local s
+  while true; do
+    s="$(rand_hex16)"
+    case "${s:0:2}" in
+      dd|ee) continue ;;
+      *) echo "$s"; return 0 ;;
+    esac
+  done
+}
+
 detect_public_host() {
   local ip
   ip="$(curl -4 -fsSL --max-time 5 https://api.ipify.org || true)"
@@ -196,7 +207,7 @@ prompt_nonempty() {
 
 print_logo
 
-BOOTSTRAP_SECRET="$(rand_hex16)"
+BOOTSTRAP_SECRET="$(rand_bootstrap_secret)"
 ADMIN_TOKEN="$(rand_hex16)$(rand_hex16)"
 PUBLIC_HOST="$(detect_public_host)"
 
