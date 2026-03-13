@@ -43,37 +43,26 @@ proxyctl bot enable <hex32>
 proxyctl bot revoke <hex32>
 ```
 
-## Minimal Secure SSH Profile
+## Minimal Secure SSH Profile (Login + Password)
 
-## 1) Create bot user and add to `mtproxy` group
+If your bot UI needs `ip + username + password`, run:
 ```bash
-sudo useradd -m -s /bin/bash mtproxybot || true
-sudo usermod -aG mtproxy mtproxybot
+sudo mtproxybot-setup --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
 ```
 
-## 2) Add bot SSH public key with forced command
-`~mtproxybot/.ssh/authorized_keys` entry:
-```text
-command="/usr/local/bin/proxybot-dispatch",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty <BOT_PUBLIC_KEY>
+This configures:
+- dedicated SSH user
+- membership in `mtproxy` group (socket access)
+- forced command mode: `/usr/local/bin/proxybot-dispatch`
+- disabled shell/forwarding/tunnel
+- password auth for this user
+
+Example output:
+```json
+{"ok":true,"host":"46.149.69.221","port":22,"username":"mtproxybot","password":"...","allow_from":"1.2.3.4"}
 ```
 
-This allows only approved lifecycle commands (`health`, `issue`, `enable`, `disable`, `revoke`).
-
-## 3) Optional extra hardening in `sshd_config`
-```text
-Match User mtproxybot
-    PermitTTY no
-    X11Forwarding no
-    AllowTcpForwarding no
-    PermitTunnel no
-```
-
-Restart SSH after config changes:
-```bash
-sudo systemctl restart ssh
-```
-
-## 4) Test from bot server
+## Test from bot server
 ```bash
 ssh mtproxybot@<proxy-host> 'health'
 ssh mtproxybot@<proxy-host> 'issue user_1001 --days 30'
@@ -93,4 +82,3 @@ ssh mtproxybot@<proxy-host> 'revoke <hex32>'
 ```json
 {"ok":false,"error":"..."}
 ```
-

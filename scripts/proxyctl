@@ -24,6 +24,49 @@ load_env
 SOCK="${MTPROXY_SOCKET:-$ADMIN_SOCKET}"
 TOKEN="${MTPROXY_TOKEN:-$ADMIN_TOKEN}"
 BOT_MODE=0
+BOT_SETUP_BIN="${MTPROXY_BOT_SETUP_BIN:-/usr/local/bin/mtproxybot-setup}"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  C_RESET=$'\033[0m'
+  C_BOLD=$'\033[1m'
+  C_RED=$'\033[31m'
+  C_GREEN=$'\033[32m'
+  C_YELLOW=$'\033[33m'
+  C_CYAN=$'\033[36m'
+else
+  C_RESET=""
+  C_BOLD=""
+  C_RED=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_CYAN=""
+fi
+
+paint() {
+  local color="$1"
+  local text="$2"
+  printf '%s%s%s' "$color" "$text" "$C_RESET"
+}
+
+paint_state() {
+  local active="$1"
+  local substate="$2"
+  local s="${active}/${substate}"
+  if [[ "$active" == "active" && "$substate" == "running" ]]; then
+    paint "$C_GREEN" "$s"
+  else
+    paint "$C_RED" "$s"
+  fi
+}
+
+paint_bool() {
+  local v="$1"
+  if [[ "$v" == "yes" || "$v" == "true" || "$v" == "active" ]]; then
+    paint "$C_GREEN" "$v"
+  else
+    paint "$C_RED" "$v"
+  fi
+}
 
 usage() {
   cat <<USAGE
@@ -54,6 +97,7 @@ Usage:
   proxyctl bot disable <secret>
   proxyctl bot enable <secret>
   proxyctl bot revoke <secret>
+  proxyctl bot setup-password [--user <name>] [--password <pass>] [--allow-from <ip_or_cidr>]
 
   proxyctl menu
 
@@ -65,14 +109,14 @@ USAGE
 }
 
 warn() {
-  echo "[WARN] $*" >&2
+  echo "$(paint "$C_YELLOW" "[WARN]") $*" >&2
 }
 
 die() {
   if (( BOT_MODE )); then
     printf '{"ok":false,"error":"%s"}\n' "$(json_escape "$*")"
   else
-    echo "[ERROR] $*" >&2
+    echo "$(paint "$C_RED" "[ERROR]") $*" >&2
   fi
   exit 1
 }
@@ -263,14 +307,14 @@ print_service_summary() {
   local snap active substate pid start_ts mem cpu listen host total active_secrets
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
-  echo "Service      : $SERVICE_NAME ($active/$substate)"
-  echo "Main PID     : $pid"
+  echo "Service      : $(paint "$C_BOLD" "$SERVICE_NAME") ($(paint_state "$active" "$substate"))"
+  echo "Main PID     : $(paint "$C_CYAN" "$pid")"
   echo "Started      : $start_ts"
   echo "Memory       : $(fmt_bytes "$mem")"
   echo "CPU time     : $(fmt_cpu_nsec "$cpu")"
-  echo "Client port  : $CLIENT_PORT (listening: $listen)"
+  echo "Client port  : $(paint "$C_CYAN" "$CLIENT_PORT") (listening: $(paint_bool "$listen"))"
   echo "Public host  : ${host:-unknown}"
-  echo "Secrets      : total=$total active=$active_secrets"
+  echo "Secrets      : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
 }
 
 print_service_summary_json() {
@@ -566,6 +610,15 @@ cmd_bot() {
       [[ -n "$secr" ]] || die "Usage: proxyctl bot revoke <secret>"
       api DELETE "/v1/secrets/$secr"
       ;;
+    setup-password)
+      BOT_MODE=0
+      require_root
+      shift
+      if [[ ! -x "$BOT_SETUP_BIN" ]]; then
+        die "bot setup tool not found: $BOT_SETUP_BIN"
+      fi
+      "$BOT_SETUP_BIN" "$@"
+      ;;
     *)
       die "Unknown bot action: $sub"
       ;;
@@ -583,10 +636,10 @@ menu_header() {
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
   echo
-  echo "============== Bulldog MTProxy Menu =============="
-  echo "Service   : $SERVICE_NAME ($active/$substate)  PID: $pid"
-  echo "Client    : ${host:-unknown}:$CLIENT_PORT  listening: $listen"
-  echo "Secrets   : total=$total active=$active_secrets"
+  echo "============== $(paint "$C_BOLD" "Bulldog MTProxy Menu") =============="
+  echo "Service   : $(paint "$C_BOLD" "$SERVICE_NAME") ($(paint_state "$active" "$substate"))  PID: $(paint "$C_CYAN" "$pid")"
+  echo "Client    : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
+  echo "Secrets   : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
   echo "Started   : $start_ts"
   echo "=================================================="
 }

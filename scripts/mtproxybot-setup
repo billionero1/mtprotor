@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+USER_NAME="mtproxybot"
+PASSWORD=""
+ALLOW_FROM=""
+SHOW_JSON=1
+DISPATCH_BIN="/usr/local/bin/proxybot-dispatch"
+CONF_DIR="/etc/ssh/sshd_config.d"
+
+die() {
+  printf '{"ok":false,"error":"%s"}\n' "$1"
+  exit 1
+}
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  die "run as root"
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --user)
+      USER_NAME="${2:-}"; shift 2 ;;
+    --password)
+      PASSWORD="${2:-}"; shift 2 ;;
+    --allow-from)
+      ALLOW_FROM="${2:-}"; shift 2 ;;
+    --text)
+      SHOW_JSON=0; shift ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+[[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]] || die "invalid user name"
+[[ -x "$DISPATCH_BIN" ]] || die "missing $DISPATCH_BIN"
+
+if [[ -z "$PASSWORD" ]]; then
+  if command -v openssl >/dev/null 2>&1; then
+    PASSWORD="$(openssl rand -hex 12)"
+  else
+    PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
+  fi
+fi
+
+[[ ${#PASSWORD} -ge 10 ]] || die "password too short (min 10 chars)"
+
+if ! getent group mtproxy >/dev/null 2>&1; then
+  die "group mtproxy not found; install mtproxy first"
+fi
+
+if id -u "$USER_NAME" >/dev/null 2>&1; then
+  true
+else
+  useradd -m -s /bin/bash "$USER_NAME"
+fi
+
+echo "$USER_NAME:$PASSWORD" | chpasswd
+usermod -aG mtproxy "$USER_NAME"
+
+install -d -m 0755 "$CONF_DIR"
+CONF_FILE="$CONF_DIR/90-${USER_NAME}-mtproxybot.conf"
+MATCH_LINE="Match User $USER_NAME"
+if [[ -n "$ALLOW_FROM" ]]; then
+  MATCH_LINE="Match User $USER_NAME Address $ALLOW_FROM"
+fi
+
+cat > "$CONF_FILE" <<CFG
+$MATCH_LINE
+    AuthenticationMethods password
+    PasswordAuthentication yes
+    KbdInteractiveAuthentication no
+    PubkeyAuthentication no
+    PermitTTY no
+    X11Forwarding no
+    AllowTcpForwarding no
+    PermitTunnel no
+    GatewayPorts no
+    ForceCommand $DISPATCH_BIN
+CFG
+
+if ! sshd -t; then
+  rm -f "$CONF_FILE"
+  die "invalid sshd config generated"
+fi
+
+if systemctl is-active --quiet ssh.service; then
+  systemctl reload ssh.service
+elif systemctl is-active --quiet sshd.service; then
+  systemctl reload sshd.service
+else
+  die "ssh service not active"
+fi
+
+HOST="$(curl -4 -fsSL --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+if [[ -z "$HOST" ]]; then
+  HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+
+if (( SHOW_JSON )); then
+  printf '{"ok":true,"host":"%s","port":22,"username":"%s","password":"%s","allow_from":"%s"}\n' \
+    "$HOST" "$USER_NAME" "$PASSWORD" "$ALLOW_FROM"
+else
+  echo "OK"
+  echo "host=$HOST"
+  echo "port=22"
+  echo "username=$USER_NAME"
+  echo "password=$PASSWORD"
+  echo "allow_from=$ALLOW_FROM"
+fi

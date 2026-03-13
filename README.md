@@ -39,6 +39,7 @@ After install:
 - CLI: `/usr/local/bin/proxyctl`
 - menu: `/usr/local/bin/mtproxymenu`
 - bot SSH dispatcher: `/usr/local/bin/proxybot-dispatch`
+- bot SSH password setup: `/usr/local/bin/mtproxybot-setup`
 - env/config: `/etc/default/mtproxy-fork`
 - secrets state: `/var/lib/mtproxy-fork/secrets.tsv`
 
@@ -69,6 +70,8 @@ proxyctl service restart
 proxyctl service logs
 proxyctl health
 ```
+
+`proxyctl service status` is compact by default (active status, PID, memory, CPU, listener, secret counters).
 
 ### Links
 ```bash
@@ -135,6 +138,12 @@ Notes:
 
 ## External Control for Bot (from another server)
 Recommended production method: **SSH to proxy server and run `proxyctl bot ...`**.
+
+If your third-party bot requires **IP + login + password**, use:
+```bash
+sudo mtproxybot-setup --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
+```
+This returns JSON with connection parameters and enables forced command mode for safe command-only access.
 
 Examples:
 ```bash
