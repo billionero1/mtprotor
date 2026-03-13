@@ -326,10 +326,14 @@ service_cmd() {
       systemctl "$action" "$SERVICE_NAME.service"
       ;;
     logs)
-      journalctl -u "$SERVICE_NAME.service" -u mtproxy-fork-expire-sync.service -t "$LOG_TAG" --no-pager -n 120
+      local pat
+      pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|${LOG_TAG}|proxyctl)"
+      journalctl --no-pager -n 800 -o short-iso --no-hostname | grep -E "$pat" | tail -n 120 || true
       ;;
     logs-live|logs-follow)
-      journalctl -u "$SERVICE_NAME.service" -u mtproxy-fork-expire-sync.service -t "$LOG_TAG" -f -n 60 --output=short-iso --no-hostname
+      local live_pat
+      live_pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|${LOG_TAG}|proxyctl)"
+      journalctl -f -o short-iso --no-hostname | grep --line-buffered -E "$live_pat"
       ;;
     *)
       die "Unknown service action: $action"
