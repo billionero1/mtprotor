@@ -31,7 +31,10 @@
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
+#include <stddef.h>
+#include <stdarg.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -579,24 +582,270 @@ static const char *ext_find_kv (int n, char **keys, char **vals, const char *key
   return NULL;
 }
 
-static void ext_admin_handle_client (int fd) {
-  char buf[4096];
-  int r = recv (fd, buf, sizeof (buf) - 1, 0);
-  if (r <= 0) {
-    return;
+struct ext_strbuf {
+  char *s;
+  size_t len;
+  size_t cap;
+};
+
+static int ext_sb_grow (struct ext_strbuf *B, size_t need_extra) {
+  if (B->len + need_extra + 1 <= B->cap) {
+    return 0;
   }
-  buf[r] = 0;
-  char *newline = strchr (buf, '\n');
+  size_t new_cap = B->cap ? B->cap : 512;
+  while (new_cap < B->len + need_extra + 1) {
+    new_cap *= 2;
+  }
+  char *p = realloc (B->s, new_cap);
+  if (!p) {
+    return -1;
+  }
+  B->s = p;
+  B->cap = new_cap;
+  return 0;
+}
+
+static int ext_sb_appendf (struct ext_strbuf *B, const char *fmt, ...) {
+  va_list ap;
+  va_start (ap, fmt);
+  va_list aq;
+  va_copy (aq, ap);
+  int n = vsnprintf (NULL, 0, fmt, aq);
+  va_end (aq);
+  if (n < 0) {
+    va_end (ap);
+    return -1;
+  }
+  if (ext_sb_grow (B, (size_t) n) < 0) {
+    va_end (ap);
+    return -1;
+  }
+  vsnprintf (B->s + B->len, B->cap - B->len, fmt, ap);
+  va_end (ap);
+  B->len += (size_t) n;
+  return 0;
+}
+
+static void ext_sb_free (struct ext_strbuf *B) {
+  free (B->s);
+  B->s = NULL;
+  B->len = B->cap = 0;
+}
+
+static const char *ext_http_status_text (int code) {
+  switch (code) {
+    case 200: return "OK";
+    case 201: return "Created";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 404: return "Not Found";
+    case 409: return "Conflict";
+    case 500: return "Internal Server Error";
+    default: return "OK";
+  }
+}
+
+static int ext_http_send_json (int fd, int code, const char *body) {
+  if (!body) {
+    body = "{}";
+  }
+  char header[512];
+  int h = snprintf (header, sizeof (header),
+                    "HTTP/1.1 %d %s\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Content-Length: %zu\r\n"
+                    "Connection: close\r\n"
+                    "\r\n",
+                    code, ext_http_status_text (code), strlen (body));
+  if (h <= 0 || h >= (int) sizeof (header)) {
+    return -1;
+  }
+  if (ext_write_all (fd, header, h) < 0) {
+    return -1;
+  }
+  return ext_write_all (fd, body, (int) strlen (body));
+}
+
+static int ext_http_send_error (int fd, int code, const char *msg) {
+  struct ext_strbuf B = {};
+  if (ext_sb_appendf (&B, "{\"error\":\"%s\"}", msg ? msg : "error") < 0) {
+    ext_sb_free (&B);
+    return -1;
+  }
+  int r = ext_http_send_json (fd, code, B.s);
+  ext_sb_free (&B);
+  return r;
+}
+
+static int ext_http_get_header_value (const char *headers, const char *name, char *out, int out_size) {
+  if (!headers || !name || !out || out_size <= 0) {
+    return 0;
+  }
+  char pattern[128];
+  if (snprintf (pattern, sizeof (pattern), "\r\n%s:", name) >= (int) sizeof (pattern)) {
+    return 0;
+  }
+  const char *p = strcasestr (headers, pattern);
+  if (p) {
+    p += 2;
+  } else {
+    if (!strncasecmp (headers, name, strlen (name)) && headers[strlen (name)] == ':') {
+      p = headers;
+    } else {
+      return 0;
+    }
+  }
+  p += strlen (name) + 1;
+  while (*p == ' ' || *p == '\t') {
+    p++;
+  }
+  int i = 0;
+  while (*p && *p != '\r' && *p != '\n' && i < out_size - 1) {
+    out[i++] = *p++;
+  }
+  out[i] = 0;
+  return i > 0;
+}
+
+static int ext_http_json_find_key (const char *body, const char *key, const char **value_start) {
+  char pattern[128];
+  if (snprintf (pattern, sizeof (pattern), "\"%s\"", key) >= (int) sizeof (pattern)) {
+    return 0;
+  }
+  const char *p = strstr (body, pattern);
+  if (!p) {
+    return 0;
+  }
+  p += strlen (pattern);
+  while (*p && isspace ((unsigned char) *p)) {
+    p++;
+  }
+  if (*p != ':') {
+    return 0;
+  }
+  p++;
+  while (*p && isspace ((unsigned char) *p)) {
+    p++;
+  }
+  *value_start = p;
+  return 1;
+}
+
+static int ext_http_json_get_string (const char *body, const char *key, char *out, int out_size) {
+  const char *p;
+  if (!ext_http_json_find_key (body, key, &p)) {
+    return 0;
+  }
+  if (*p != '"' || out_size <= 0) {
+    return 0;
+  }
+  p++;
+  int i = 0;
+  while (*p && *p != '"' && i < out_size - 1) {
+    if (*p == '\\' && p[1]) {
+      p++;
+    }
+    out[i++] = *p++;
+  }
+  if (*p != '"') {
+    return 0;
+  }
+  out[i] = 0;
+  return 1;
+}
+
+static int ext_http_json_get_int64 (const char *body, const char *key, long long *out, int *found) {
+  *found = 0;
+  const char *p;
+  if (!ext_http_json_find_key (body, key, &p)) {
+    return 1;
+  }
+  char *end = NULL;
+  errno = 0;
+  long long v = strtoll (p, &end, 10);
+  if (errno || end == p) {
+    return 0;
+  }
+  *out = v;
+  *found = 1;
+  return 1;
+}
+
+static int ext_http_json_get_bool (const char *body, const char *key, int *out, int *found) {
+  *found = 0;
+  const char *p;
+  if (!ext_http_json_find_key (body, key, &p)) {
+    return 1;
+  }
+  if (!strncasecmp (p, "true", 4)) {
+    *out = 1;
+    *found = 1;
+    return 1;
+  }
+  if (!strncasecmp (p, "false", 5)) {
+    *out = 0;
+    *found = 1;
+    return 1;
+  }
+  if (*p == '1') {
+    *out = 1;
+    *found = 1;
+    return 1;
+  }
+  if (*p == '0') {
+    *out = 0;
+    *found = 1;
+    return 1;
+  }
+  return 0;
+}
+
+static int ext_http_append_status_json (struct ext_strbuf *B) {
+  long long now = ext_now_sec();
+  int total = tcp_rpcs_total_secret_count();
+  int active = tcp_rpcs_active_secret_count (now);
+  return ext_sb_appendf (B, "{\"ok\":true,\"total\":%d,\"active\":%d,\"now\":%lld}", total, active, now);
+}
+
+static int ext_http_append_list_json (struct ext_strbuf *B) {
+  long long now = ext_now_sec();
+  if (ext_sb_appendf (B, "{\"ok\":true,\"secrets\":[") < 0) {
+    return -1;
+  }
+  pthread_rwlock_rdlock (&ext_secret_lock);
+  int i;
+  for (i = 0; i < ext_secret_cnt; i++) {
+    struct ext_secret_entry *E = &ext_secrets[i];
+    int active = ext_is_active_locked (E, now);
+    if (i && ext_sb_appendf (B, ",") < 0) {
+      pthread_rwlock_unlock (&ext_secret_lock);
+      return -1;
+    }
+    if (ext_sb_appendf (B,
+                        "{\"secret\":\"%s\",\"enabled\":%s,\"active\":%s,"
+                        "\"expires\":%lld,\"created\":%lld,\"updated\":%lld,\"label\":\"%s\"}",
+                        E->hex, E->enabled ? "true" : "false", active ? "true" : "false",
+                        E->expires_at, E->created_at, E->updated_at, E->label) < 0) {
+      pthread_rwlock_unlock (&ext_secret_lock);
+      return -1;
+    }
+  }
+  pthread_rwlock_unlock (&ext_secret_lock);
+  return ext_sb_appendf (B, "]}");
+}
+
+static void ext_admin_handle_line (int fd, char *line) {
+  char *newline = strchr (line, '\n');
   if (newline) {
     *newline = 0;
   }
-
   char *saveptr = NULL;
-  char *cmd = strtok_r (buf, " \t\r", &saveptr);
+  char *cmd = strtok_r (line, " \t\r", &saveptr);
   if (!cmd) {
     ext_admin_send_err (fd, "empty command");
     return;
   }
+
   char *keys[64], *vals[64];
   int kvn = 0;
   char *tok;
@@ -714,6 +963,240 @@ static void ext_admin_handle_client (int fd) {
   ext_admin_send_err (fd, "unknown command");
 }
 
+static int ext_http_parse_content_length (const char *headers) {
+  char val[64];
+  if (!ext_http_get_header_value (headers, "Content-Length", val, sizeof (val))) {
+    return 0;
+  }
+  int n = atoi (val);
+  if (n < 0) {
+    n = 0;
+  }
+  return n;
+}
+
+static int ext_http_extract_token_from_uri (const char *uri, char *out, int out_size) {
+  const char *q = strchr (uri, '?');
+  if (!q) {
+    return 0;
+  }
+  q++;
+  while (*q) {
+    const char *amp = strchr (q, '&');
+    size_t len = amp ? (size_t) (amp - q) : strlen (q);
+    if (len > 6 && !strncmp (q, "token=", 6)) {
+      size_t i, m = len - 6;
+      if ((int) m >= out_size) {
+        m = out_size - 1;
+      }
+      for (i = 0; i < m; i++) {
+        out[i] = q[6 + i];
+      }
+      out[m] = 0;
+      return 1;
+    }
+    if (!amp) {
+      break;
+    }
+    q = amp + 1;
+  }
+  return 0;
+}
+
+static void ext_admin_handle_http (int fd, char *req) {
+  char *headers_end = strstr (req, "\r\n\r\n");
+  if (!headers_end) {
+    ext_http_send_error (fd, 400, "invalid http request");
+    return;
+  }
+  *headers_end = 0;
+  char *body = headers_end + 4;
+
+  char method[16], uri[1024], version[16];
+  if (sscanf (req, "%15s %1023s %15s", method, uri, version) != 3) {
+    ext_http_send_error (fd, 400, "invalid request line");
+    return;
+  }
+
+  if (ext_secret_admin_token[0]) {
+    char header_token[EXT_SECRET_ADMIN_TOKEN_MAX];
+    int ok = ext_http_get_header_value (req, "X-Admin-Token", header_token, sizeof (header_token));
+    if (!ok) {
+      ok = ext_http_extract_token_from_uri (uri, header_token, sizeof (header_token));
+    }
+    if (!ok || strcmp (header_token, ext_secret_admin_token)) {
+      ext_http_send_error (fd, 401, "unauthorized");
+      return;
+    }
+  }
+
+  char path[1024];
+  snprintf (path, sizeof (path), "%s", uri);
+  char *q = strchr (path, '?');
+  if (q) {
+    *q = 0;
+  }
+
+  if (!strcmp (method, "GET") && !strcmp (path, "/v1/status")) {
+    struct ext_strbuf B = {};
+    if (ext_http_append_status_json (&B) < 0) {
+      ext_sb_free (&B);
+      ext_http_send_error (fd, 500, "oom");
+      return;
+    }
+    ext_http_send_json (fd, 200, B.s);
+    ext_sb_free (&B);
+    return;
+  }
+
+  if (!strcmp (method, "GET") && !strcmp (path, "/v1/secrets")) {
+    struct ext_strbuf B = {};
+    if (ext_http_append_list_json (&B) < 0) {
+      ext_sb_free (&B);
+      ext_http_send_error (fd, 500, "oom");
+      return;
+    }
+    ext_http_send_json (fd, 200, B.s);
+    ext_sb_free (&B);
+    return;
+  }
+
+  if (!strcmp (method, "POST") && !strcmp (path, "/v1/secrets")) {
+    char secret[64], label[EXT_SECRET_LABEL_MAX];
+    secret[0] = label[0] = 0;
+    if (!ext_http_json_get_string (body, "secret", secret, sizeof (secret))) {
+      ext_http_send_error (fd, 400, "secret is required");
+      return;
+    }
+    ext_http_json_get_string (body, "label", label, sizeof (label));
+    long long expires = 0;
+    int found_expires = 0;
+    if (!ext_http_json_get_int64 (body, "expires", &expires, &found_expires)) {
+      ext_http_send_error (fd, 400, "invalid expires");
+      return;
+    }
+    if (!found_expires && !ext_http_json_get_int64 (body, "expires_at", &expires, &found_expires)) {
+      ext_http_send_error (fd, 400, "invalid expires_at");
+      return;
+    }
+    int enabled = 1;
+    int found_enabled = 0;
+    if (!ext_http_json_get_bool (body, "enabled", &enabled, &found_enabled)) {
+      ext_http_send_error (fd, 400, "invalid enabled");
+      return;
+    }
+    int rc = ext_cmd_add (secret, label, found_expires ? expires : 0, enabled);
+    if (rc == -2) {
+      ext_http_send_error (fd, 400, "invalid secret hex");
+    } else if (rc < 0) {
+      ext_http_send_error (fd, 409, "add failed");
+    } else {
+      ext_http_send_json (fd, 201, "{\"ok\":true}");
+    }
+    return;
+  }
+
+  if (!strcmp (method, "DELETE") && !strncmp (path, "/v1/secrets/", 12)) {
+    const char *secret = path + 12;
+    if (!*secret) {
+      ext_http_send_error (fd, 400, "secret is required");
+      return;
+    }
+    int rc = ext_cmd_remove (secret);
+    if (rc == -2) {
+      ext_http_send_error (fd, 400, "invalid secret hex");
+    } else if (rc == -3) {
+      ext_http_send_error (fd, 404, "secret not found");
+    } else if (rc < 0) {
+      ext_http_send_error (fd, 500, "remove failed");
+    } else {
+      ext_http_send_json (fd, 200, "{\"ok\":true}");
+    }
+    return;
+  }
+
+  if (!strcmp (method, "PATCH") && !strncmp (path, "/v1/secrets/", 12)) {
+    char tmp[1024];
+    snprintf (tmp, sizeof (tmp), "%s", path + 12);
+    char *slash = strchr (tmp, '/');
+    if (!slash) {
+      ext_http_send_error (fd, 404, "not found");
+      return;
+    }
+    *slash = 0;
+    const char *secret = tmp;
+    const char *action = slash + 1;
+    int enable;
+    if (!strcmp (action, "enable")) {
+      enable = 1;
+    } else if (!strcmp (action, "disable")) {
+      enable = 0;
+    } else {
+      ext_http_send_error (fd, 404, "not found");
+      return;
+    }
+    int rc = ext_cmd_set_enabled (secret, enable);
+    if (rc == -2) {
+      ext_http_send_error (fd, 400, "invalid secret hex");
+    } else if (rc == -3) {
+      ext_http_send_error (fd, 404, "secret not found");
+    } else if (rc < 0) {
+      ext_http_send_error (fd, 500, "update failed");
+    } else {
+      ext_http_send_json (fd, 200, "{\"ok\":true}");
+    }
+    return;
+  }
+
+  ext_http_send_error (fd, 404, "not found");
+}
+
+static int ext_is_http_method_prefix (const char *buf) {
+  return !strncmp (buf, "GET ", 4) ||
+         !strncmp (buf, "POST ", 5) ||
+         !strncmp (buf, "PATCH ", 6) ||
+         !strncmp (buf, "DELETE ", 7);
+}
+
+static void ext_admin_handle_client (int fd) {
+  char buf[16384];
+  int len = 0;
+  int r;
+  while (len < (int) sizeof (buf) - 1) {
+    r = recv (fd, buf + len, sizeof (buf) - 1 - len, 0);
+    if (r <= 0) {
+      break;
+    }
+    len += r;
+    buf[len] = 0;
+    if (!ext_is_http_method_prefix (buf)) {
+      if (strchr (buf, '\n')) {
+        break;
+      }
+      continue;
+    }
+    char *headers_end = strstr (buf, "\r\n\r\n");
+    if (!headers_end) {
+      continue;
+    }
+    int content_length = ext_http_parse_content_length (buf);
+    int need = (int) ((headers_end + 4) - buf) + content_length;
+    if (len >= need) {
+      break;
+    }
+  }
+  if (len <= 0) {
+    return;
+  }
+  buf[len] = 0;
+
+  if (ext_is_http_method_prefix (buf)) {
+    ext_admin_handle_http (fd, buf);
+    return;
+  }
+  ext_admin_handle_line (fd, buf);
+}
+
 static void *ext_admin_thread_main (void *arg) {
   (void) arg;
   int fd = socket (AF_UNIX, SOCK_STREAM, 0);
@@ -730,11 +1213,16 @@ static void *ext_admin_thread_main (void *arg) {
   struct sockaddr_un addr;
   memset (&addr, 0, sizeof (addr));
   addr.sun_family = AF_UNIX;
-  size_t sun_path_len = strnlen (ext_secret_admin_socket, sizeof (addr.sun_path) - 1);
+  size_t sun_path_len = strlen (ext_secret_admin_socket);
+  if (sun_path_len >= sizeof (addr.sun_path)) {
+    close (fd);
+    return NULL;
+  }
   memcpy (addr.sun_path, ext_secret_admin_socket, sun_path_len);
   addr.sun_path[sun_path_len] = 0;
 
-  if (bind (fd, (struct sockaddr *) &addr, sizeof (addr)) < 0) {
+  socklen_t bind_len = (socklen_t) (offsetof (struct sockaddr_un, sun_path) + sun_path_len + 1);
+  if (bind (fd, (struct sockaddr *) &addr, bind_len) < 0) {
     close (fd);
     return NULL;
   }

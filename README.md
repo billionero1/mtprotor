@@ -13,6 +13,7 @@ Notes:
 - Hot-reload mode is single-process only (`--admin-socket` is not supported with `--slaves`).
 - Existing active client connections are not dropped when secrets are added/removed.
 - Secret state is persisted atomically and restored on next start.
+- Admin API is available over Unix socket in HTTP/JSON format (plus legacy line protocol).
 
 ## Building
 Install dependencies, you would need common set of tools for building from source, and development packages for `openssl` and `zlib`.
@@ -82,7 +83,38 @@ Example:
   proxy-multi.conf
 ```
 
-Admin protocol is line-based over Unix socket:
+HTTP/JSON endpoints over Unix socket:
+- `GET /v1/status`
+- `GET /v1/secrets`
+- `POST /v1/secrets`
+- `DELETE /v1/secrets/{secret_hex}`
+- `PATCH /v1/secrets/{secret_hex}/enable`
+- `PATCH /v1/secrets/{secret_hex}/disable`
+
+`POST /v1/secrets` body example:
+```json
+{"secret":"11111111111111111111111111111111","label":"user42","enabled":true,"expires":0}
+```
+
+Example via Python Unix socket:
+```bash
+python3 - <<'PY'
+import socket
+sock="/run/mtproxy/admin.sock"
+req = (
+  "GET /v1/status HTTP/1.1\\r\\n"
+  "Host: local\\r\\n"
+  "Content-Length: 0\\r\\n\\r\\n"
+).encode()
+s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sock)
+s.sendall(req)
+print(s.recv(65535).decode())
+s.close()
+PY
+```
+
+Legacy line protocol is also supported:
 - `STATUS`
 - `LIST`
 - `ADD secret=<hex32> label=<label> expires=<unix_ts_or_0> enabled=<0|1>`
@@ -90,7 +122,9 @@ Admin protocol is line-based over Unix socket:
 - `ENABLE secret=<hex32>`
 - `DISABLE secret=<hex32>`
 
-If `--admin-token` is configured, include `token=<token>` in command arguments.
+If `--admin-token` is configured:
+- HTTP: send header `X-Admin-Token: <token>`
+- Line protocol: include `token=<token>` in command arguments.
 
 Examples:
 ```bash
