@@ -130,9 +130,11 @@ apt-get install -y --no-install-recommends \
 cleanup_old() {
   echo "[2/8] Removing old services/processes..."
   systemctl disable --now mtprotor.service MTProxy.service "$SERVICE_NAME" 2>/dev/null || true
-  rm -f /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
+  rm -f "$UNIT_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
-  rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor
+  rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
+  rm -f "$ENV_FILE"
+  systemctl daemon-reload || true
 }
 
 if [[ "$CLEAN_OLD" == "yes" ]]; then

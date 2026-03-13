@@ -21,6 +21,8 @@ Interactive installer (asks port/secret/token and removes old stack first):
 curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/install.sh | sudo bash
 ```
 
+In non-interactive mode it uses defaults and performs clean reinstall (`CLEAN_OLD=yes`).
+
 Uninstall:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/uninstall.sh | sudo bash
