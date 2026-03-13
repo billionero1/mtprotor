@@ -604,6 +604,44 @@ static int ext_cmd_set_enabled (const char *hex, int enabled) {
   return r;
 }
 
+static int ext_cmd_disable_expired (long long now, int *checked_out, int *disabled_out, long long *now_out) {
+  if (now <= 0) {
+    now = ext_now_sec();
+  }
+  int checked = 0;
+  int disabled = 0;
+  int changed = 0;
+
+  pthread_rwlock_wrlock (&ext_secret_lock);
+  int i;
+  for (i = 0; i < ext_secret_cnt; i++) {
+    struct ext_secret_entry *E = &ext_secrets[i];
+    checked++;
+    if (E->enabled && E->expires_at > 0 && now >= E->expires_at) {
+      E->enabled = 0;
+      E->updated_at = now;
+      disabled++;
+      changed = 1;
+    }
+  }
+  int r = 0;
+  if (changed) {
+    r = ext_persist_locked();
+  }
+  pthread_rwlock_unlock (&ext_secret_lock);
+
+  if (checked_out) {
+    *checked_out = checked;
+  }
+  if (disabled_out) {
+    *disabled_out = disabled;
+  }
+  if (now_out) {
+    *now_out = now;
+  }
+  return r;
+}
+
 static void ext_admin_send_err (int fd, const char *msg) {
   char buf[256];
   int n = snprintf (buf, sizeof (buf), "ERR %s\n", msg ? msg : "error");
@@ -939,6 +977,21 @@ static void ext_admin_handle_line (int fd, char *line) {
     ext_write_all (fd, ".\n", 2);
     return;
   }
+  if (!strcasecmp (cmd, "EXPIRE_DISABLE") || !strcasecmp (cmd, "SYNC_EXPIRED")) {
+    const char *now_s = ext_find_kv (kvn, keys, vals, "now");
+    long long now = now_s ? atoll (now_s) : 0;
+    int checked = 0, disabled = 0;
+    long long used_now = 0;
+    int rc = ext_cmd_disable_expired (now, &checked, &disabled, &used_now);
+    if (rc < 0) {
+      ext_admin_send_err (fd, "update failed");
+    } else {
+      char out[256];
+      int n = snprintf (out, sizeof (out), "OK checked=%d disabled=%d now=%lld\n", checked, disabled, used_now);
+      ext_write_all (fd, out, n);
+    }
+    return;
+  }
   if (!strcasecmp (cmd, "ADD")) {
     const char *secret = ext_find_kv (kvn, keys, vals, "secret");
     if (!secret) {
@@ -1131,6 +1184,31 @@ static void ext_admin_handle_http (int fd, char *req) {
     } else {
       ext_http_send_json (fd, 201, "{\"ok\":true}");
     }
+    return;
+  }
+
+  if (!strcmp (method, "POST") && !strcmp (path, "/v1/secrets/expire_disable")) {
+    long long now = 0;
+    int found_now = 0;
+    if (!ext_http_json_get_int64 (body, "now", &now, &found_now)) {
+      ext_http_send_error (fd, 400, "invalid now");
+      return;
+    }
+    int checked = 0, disabled = 0;
+    long long used_now = 0;
+    int rc = ext_cmd_disable_expired (found_now ? now : 0, &checked, &disabled, &used_now);
+    if (rc < 0) {
+      ext_http_send_error (fd, 500, "update failed");
+      return;
+    }
+    struct ext_strbuf B = {};
+    if (ext_sb_appendf (&B, "{\"ok\":true,\"checked\":%d,\"disabled\":%d,\"now\":%lld}", checked, disabled, used_now) < 0) {
+      ext_sb_free (&B);
+      ext_http_send_error (fd, 500, "oom");
+      return;
+    }
+    ext_http_send_json (fd, 200, B.s);
+    ext_sb_free (&B);
     return;
   }
 

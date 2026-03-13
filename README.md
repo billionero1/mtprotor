@@ -212,9 +212,12 @@ Endpoints:
 - `GET /v1/status`
 - `GET /v1/secrets`
 - `POST /v1/secrets`
+- `POST /v1/secrets/expire_disable`
 - `DELETE /v1/secrets/{secret}`
 - `PATCH /v1/secrets/{secret}/enable`
 - `PATCH /v1/secrets/{secret}/disable`
+
+Legacy line-protocol includes: `PING`, `STATUS`, `LIST`, `ADD`, `REMOVE`, `ENABLE`, `DISABLE`, `EXPIRE_DISABLE`.
 
 Accepted secret formats:
 - plain: `<32 hex>`

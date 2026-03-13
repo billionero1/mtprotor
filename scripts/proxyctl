@@ -638,12 +638,28 @@ cmd_secret_list_table() {
 }
 
 cmd_secret_expire_disable() {
-  local json now
+  local json now resp checked disabled
   ensure_socket
-  json="$(request GET /v1/secrets)"
   now="$(date +%s)"
-  local disabled=0
-  local checked=0
+
+  # Fast path for newer runtime: one lock pass + one persist in daemon.
+  resp="$(request POST /v1/secrets/expire_disable "{\"now\":$now}" 2>/dev/null || true)"
+  if json_is_ok "$resp"; then
+    checked="$(echo "$resp" | sed -n 's/.*"checked":\([0-9][0-9]*\).*/\1/p')"
+    disabled="$(echo "$resp" | sed -n 's/.*"disabled":\([0-9][0-9]*\).*/\1/p')"
+    checked="${checked:-0}"
+    disabled="${disabled:-0}"
+    if (( disabled > 0 )); then
+      audit_log info "secret_disable_expired_batch checked=$checked disabled=$disabled now=$now"
+    fi
+    printf '{"ok":true,"checked":%d,"disabled":%d,"now":%s}\n' "$checked" "$disabled" "$now"
+    return 0
+  fi
+
+  # Backward-compatible fallback for older runtimes (per-secret PATCH loop).
+  json="$(request GET /v1/secrets)"
+  disabled=0
+  checked=0
 
   local rows row
   rows="$(secrets_json_rows "$json")"
