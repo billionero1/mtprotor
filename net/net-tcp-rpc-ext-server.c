@@ -449,6 +449,12 @@ int tcp_rpcs_load_secrets_state (void) {
     }
     int idx = ext_find_idx_locked (secret);
     if (idx >= 0) {
+      struct ext_secret_entry *E = &ext_secrets[idx];
+      E->enabled = atoi (enabled_s) ? 1 : 0;
+      E->expires_at = atoll (expires_s);
+      E->created_at = atoll (created_s);
+      E->updated_at = atoll (updated_s);
+      ext_sanitize_label (label ? label : "", E->label);
       continue;
     }
     if (ext_reserve_locked (ext_secret_cnt + 1) < 0) {
