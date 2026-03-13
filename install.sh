@@ -342,10 +342,6 @@ if ! ss -ltn | awk '{print $4}' | grep -qE "(^|:)${CLIENT_PORT}$"; then
   die "Client port $CLIENT_PORT is not listening"
 fi
 
-if ! ss -ltn | awk '{print $4}' | grep -qE "(^|:)${STATS_PORT}$"; then
-  warn "Stats port $STATS_PORT is not listening externally (expected if loopback-only env)"
-fi
-
 if [[ -n "$SECRET_PREFIX" ]]; then
   LINK_SECRET="${SECRET_PREFIX}${BOOTSTRAP_SECRET,,}"
 else
