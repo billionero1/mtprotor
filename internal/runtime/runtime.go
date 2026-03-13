@@ -352,10 +352,21 @@ func (r *Runtime) handleConn(client net.Conn) {
 	_ = client.SetReadDeadline(time.Time{})
 
 	records := r.enabledSecretsSnapshot(time.Now().UTC())
-	rec, ok := handshake.MatchSecret(records, first, time.Now().UTC())
-	if !ok {
-		r.logger.Debug("secret mismatch; drop connection", "remote", client.RemoteAddr().String())
+	if len(records) == 0 {
+		r.logger.Debug("no enabled secrets; drop connection", "remote", client.RemoteAddr().String())
 		return
+	}
+
+	// Fast path: with a single active secret there is no routing ambiguity.
+	// Let official mtproto-proxy perform the final secret validation.
+	rec := records[0]
+	if len(records) > 1 {
+		matched, ok := handshake.MatchSecret(records, first, time.Now().UTC())
+		if !ok {
+			r.logger.Debug("secret mismatch; drop connection", "remote", client.RemoteAddr().String())
+			return
+		}
+		rec = matched
 	}
 
 	if rec.MaxConnections > 0 {
