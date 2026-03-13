@@ -32,7 +32,8 @@ if ! command -v apt-get >/dev/null 2>&1; then
 fi
 
 is_interactive=0
-if [[ -r /dev/tty && -w /dev/tty ]]; then
+tty_fd=9
+if exec {tty_fd}<>/dev/tty 2>/dev/null; then
   is_interactive=1
 fi
 
@@ -61,8 +62,8 @@ prompt_default() {
   local def="$3"
   local val=""
   if (( is_interactive )); then
-    printf "%s [%s]: " "$question" "$def" > /dev/tty
-    IFS= read -r val < /dev/tty || true
+    printf "%s [%s]: " "$question" "$def" >&"$tty_fd"
+    IFS= read -r val <&"$tty_fd" || true
   fi
   if [[ -z "$val" ]]; then
     val="$def"
@@ -80,8 +81,8 @@ prompt_yes_no() {
     hint="y/N"
   fi
   if (( is_interactive )); then
-    printf "%s [%s]: " "$question" "$hint" > /dev/tty
-    IFS= read -r val < /dev/tty || true
+    printf "%s [%s]: " "$question" "$hint" >&"$tty_fd"
+    IFS= read -r val <&"$tty_fd" || true
   fi
   val="${val:-}"
   if [[ -z "$val" ]]; then
