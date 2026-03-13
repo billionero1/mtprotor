@@ -76,15 +76,18 @@ dogctl runtime status
 dogctl runtime restart
 dogctl runtime logs
 dogctl runtime logs-live
+dogctl runtime update
 proxyctl runtime status
 proxyctl runtime restart
 proxyctl runtime logs
 proxyctl runtime logs-live
+proxyctl runtime update
 proxyctl service status
 proxyctl service status --full
 proxyctl service status --json
 proxyctl service restart
 proxyctl service logs
+proxyctl service update
 proxyctl health
 ```
 
@@ -133,6 +136,7 @@ dogctl console
 Menu includes:
 - runtime status/health/logs
 - runtime logs in real time (`journalctl -f` style)
+- runtime self-update from git repo (`fetch + rebuild + reinstall + restart`)
 - default links
 - list users (table: active/expired/disabled + active_until)
 - issue/disable/enable/remove user
@@ -173,6 +177,7 @@ Notes:
 - Bootstrap secret change is applied via runtime API and persisted.
 - `tls-domain` change restarts runtime and enables TLS domain camouflage mode.
 - When `tls-domain` is enabled, stealth mode is forced to `ee`.
+- `runtime update` uses `SOURCE_DIR` and `SOURCE_REF` from `/etc/default/mtproxy-fork` (defaults: `/opt/mtproxy-fork-src`, `main`).
 
 Stealth modes (simple):
 - `plain` = no prefix, max compatibility, minimum camouflage.

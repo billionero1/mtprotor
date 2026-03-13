@@ -21,6 +21,8 @@ load_env() {
   : "${ADMIN_TOKEN:=}"
   : "${ADMIN_TOKEN_FILE:=/etc/mtproxy-fork/admin.token}"
   : "${TLS_DOMAIN:=}"
+  : "${SOURCE_DIR:=/opt/mtproxy-fork-src}"
+  : "${SOURCE_REF:=main}"
   if [[ -z "${SECRET_PREFIX+x}" ]]; then
     SECRET_PREFIX="dd"
   elif [[ -z "$SECRET_PREFIX" ]]; then
@@ -88,9 +90,9 @@ Usage:
   proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd|--ee] [--domain <host>]
 
   proxyctl runtime status [--full|--json]
-  proxyctl runtime start|stop|restart|logs|logs-live
+  proxyctl runtime start|stop|restart|logs|logs-live|update
   proxyctl service status [--full|--json]
-  proxyctl service start|stop|restart|logs|logs-live
+  proxyctl service start|stop|restart|logs|logs-live|update
   proxyctl config show
   proxyctl config set client-port <1..65535>
   proxyctl config set stats-port <1..65535>
@@ -336,6 +338,9 @@ service_cmd() {
       require_root
       systemctl "$action" "$SERVICE_NAME.service"
       ;;
+    update)
+      runtime_update
+      ;;
     logs)
       local pat
       pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|${LOG_TAG}|proxyctl)"
@@ -350,6 +355,68 @@ service_cmd() {
       die "Unknown service action: $action"
       ;;
   esac
+}
+
+runtime_update() {
+  require_root
+  local src="$SOURCE_DIR"
+  local ref="${SOURCE_REF:-main}"
+  local jobs unit_file expire_service expire_timer
+  local bin ctl dogctl dogmenu dispatch botsetup runner menu
+
+  unit_file="/etc/systemd/system/mtproxy-fork.service"
+  expire_service="/etc/systemd/system/mtproxy-fork-expire-sync.service"
+  expire_timer="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
+  bin="/usr/local/bin/mtproto-proxy-fork"
+  ctl="/usr/local/bin/proxyctl"
+  dogctl="/usr/local/bin/dogctl"
+  dogmenu="/usr/local/bin/dogmenu"
+  dispatch="/usr/local/bin/proxybot-dispatch"
+  botsetup="/usr/local/bin/mtproxybot-setup"
+  runner="/usr/local/bin/mtproxy-fork-run"
+  menu="/usr/local/bin/mtproxymenu"
+
+  [[ -d "$src/.git" ]] || die "source repo not found at $src (set SOURCE_DIR in $ENV_FILE)"
+
+  echo "[update] source: $src"
+  echo "[update] ref: $ref"
+  git -C "$src" fetch --depth 1 origin "$ref"
+  git -C "$src" checkout -q "$ref"
+  git -C "$src" reset --hard "origin/$ref"
+
+  jobs="$(nproc 2>/dev/null || echo 1)"
+  [[ "$jobs" =~ ^[0-9]+$ ]] || jobs=1
+  (( jobs > 0 )) || jobs=1
+  echo "[update] build jobs: $jobs"
+  make -C "$src" clean
+  make -C "$src" -j"$jobs"
+
+  install -m 0755 "$src/objs/bin/mtproto-proxy" "$bin"
+  install -m 0755 "$src/scripts/proxyctl" "$ctl"
+  install -m 0755 "$src/scripts/dogctl" "$dogctl"
+  install -m 0755 "$src/scripts/dogmenu" "$dogmenu"
+  install -m 0755 "$src/scripts/proxybot-dispatch" "$dispatch"
+  install -m 0755 "$src/scripts/mtproxybot-setup" "$botsetup"
+  if [[ -f "$src/scripts/mtproxy-fork-run" ]]; then
+    install -m 0755 "$src/scripts/mtproxy-fork-run" "$runner"
+  fi
+  install -m 0644 "$src/systemd/mtproxy-fork.service" "$unit_file"
+  install -m 0644 "$src/systemd/mtproxy-fork-expire-sync.service" "$expire_service"
+  install -m 0644 "$src/systemd/mtproxy-fork-expire-sync.timer" "$expire_timer"
+  cat > "$menu" <<'MENU'
+#!/usr/bin/env bash
+exec /usr/local/bin/dogmenu "$@"
+MENU
+  chmod 0755 "$menu"
+
+  systemctl daemon-reload
+  systemctl enable --now mtproxy-fork-expire-sync.timer >/dev/null 2>&1 || true
+  systemctl restart "$SERVICE_NAME.service"
+  systemctl is-active --quiet "$SERVICE_NAME.service" || die "service failed after update; check journalctl -u $SERVICE_NAME -n 120"
+
+  local rev
+  rev="$(git -C "$src" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  echo "[update] done: revision=$rev"
 }
 
 update_env_key() {
@@ -634,6 +701,8 @@ cmd_link() {
 cmd_config_show() {
   cat <<CFG
 ENV_FILE=$ENV_FILE
+SOURCE_DIR=$SOURCE_DIR
+SOURCE_REF=$SOURCE_REF
 CLIENT_PORT=$CLIENT_PORT
 STATS_PORT=$STATS_PORT
 PUBLIC_HOST=$PUBLIC_HOST
@@ -1251,24 +1320,25 @@ menu_cmd() {
     echo "4) Full systemd runtime status"
     echo "5) Runtime logs (last 120)"
     echo "6) Runtime logs (live)"
+    echo "7) Update runtime from repo"
     echo
     echo "[Client Access]"
-    echo "7) Show default client links"
-    echo "8) Change client port (restart)"
-    echo "9) Rotate bootstrap secret"
-    echo "10) Change public host"
-    echo "11) Stealth presets / mode"
+    echo "8) Show default client links"
+    echo "9) Change client port (restart)"
+    echo "10) Rotate bootstrap secret"
+    echo "11) Change public host"
+    echo "12) Stealth presets / mode"
     echo
     echo "[Users / Subscriptions]"
-    echo "12) List users (table)"
-    echo "13) Issue user access (secret + link)"
-    echo "14) Suspend user access"
-    echo "15) Resume user access"
-    echo "16) Revoke user access"
-    echo "17) Sync expired users -> disabled"
+    echo "13) List users (table)"
+    echo "14) Issue user access (secret + link)"
+    echo "15) Suspend user access"
+    echo "16) Resume user access"
+    echo "17) Revoke user access"
+    echo "18) Sync expired users -> disabled"
     echo
     echo "[Bot Integration]"
-    echo "18) Bot SSH settings (login/password/allow-from)"
+    echo "19) Bot SSH settings (login/password/allow-from)"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
@@ -1293,30 +1363,33 @@ menu_cmd() {
         run_safe service_cmd logs-live
         ;;
       7)
-        run_safe cmd_link
+        run_safe service_cmd update
         ;;
       8)
+        run_safe cmd_link
+        ;;
+      9)
         printf "New client port: "
         IFS= read -r newport || true
         [[ -n "$newport" ]] && run_safe cmd_config_set client-port "$newport"
         ;;
-      9)
+      10)
         printf "New bootstrap secret (32 hex): "
         IFS= read -r news || true
         [[ -n "$news" ]] && run_safe cmd_config_set bootstrap-secret "$news"
         ;;
-      10)
+      11)
         printf "New public host/IP: "
         IFS= read -r newhost || true
         [[ -n "$newhost" ]] && run_safe cmd_config_set public-host "$newhost"
         ;;
-      11)
+      12)
         run_safe menu_stealth_settings
         ;;
-      12)
+      13)
         run_safe cmd_secret list --table
         ;;
-      13)
+      14)
         printf "Label: "
         IFS= read -r label || true
         [[ -n "$label" ]] || { warn "label is required"; continue; }
@@ -1328,25 +1401,25 @@ menu_cmd() {
           run_safe cmd_secret issue "$label"
         fi
         ;;
-      14)
+      15)
         printf "Secret to suspend: "
         IFS= read -r secd || true
         [[ -n "$secd" ]] && run_safe cmd_secret disable "$secd"
         ;;
-      15)
+      16)
         printf "Secret to resume: "
         IFS= read -r sece || true
         [[ -n "$sece" ]] && run_safe cmd_secret enable "$sece"
         ;;
-      16)
+      17)
         printf "Secret to revoke/remove: "
         IFS= read -r secr || true
         [[ -n "$secr" ]] && run_safe cmd_secret remove "$secr"
         ;;
-      17)
+      18)
         run_safe cmd_secret expire-disable
         ;;
-      18)
+      19)
         run_safe menu_bot_settings
         ;;
       0)
@@ -1377,7 +1450,7 @@ case "$cmd" in
     ;;
   service|runtime)
     sub="${2:-}"
-    [[ -n "$sub" ]] || die "Usage: proxyctl runtime status [--full|--json] | start|stop|restart|logs|logs-live"
+    [[ -n "$sub" ]] || die "Usage: proxyctl runtime status [--full|--json] | start|stop|restart|logs|logs-live|update"
     opt="${3:-}"
     service_cmd "$sub" "$opt"
     ;;
