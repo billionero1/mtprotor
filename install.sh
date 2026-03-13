@@ -236,5 +236,6 @@ echo "Manage secrets: proxyctl status | proxyctl secret list"
 echo "API socket: $ADMIN_SOCKET"
 echo "API token: $ADMIN_TOKEN"
 if [[ -n "$SERVER_IP" ]]; then
-  echo "Bootstrap link: tg://proxy?server=${SERVER_IP}&port=${CLIENT_PORT}&secret=dd${BOOTSTRAP_SECRET}"
+  echo "Bootstrap link (recommended for iOS paste): https://t.me/proxy?server=${SERVER_IP}&port=${CLIENT_PORT}&secret=dd${BOOTSTRAP_SECRET}"
+  echo "Bootstrap deep-link: tg://proxy?server=${SERVER_IP}&port=${CLIENT_PORT}&secret=dd${BOOTSTRAP_SECRET}"
 fi

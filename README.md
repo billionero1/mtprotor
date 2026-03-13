@@ -23,6 +23,12 @@ curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/install.s
 
 In non-interactive mode it uses defaults and performs clean reinstall (`CLEAN_OLD=yes`).
 
+For Telegram iOS "Paste from clipboard", prefer:
+```text
+https://t.me/proxy?server=<IP>&port=<PORT>&secret=dd<SECRET32>
+```
+`tg://proxy?...` is kept as optional deep-link format.
+
 Uninstall:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/uninstall.sh | sudo bash
