@@ -1,0 +1,8 @@
+[Unit]
+Description=MTProxy Fork Expire Sync
+After=mtproxy-fork.service
+Wants=mtproxy-fork.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/proxyctl secret expire-disable

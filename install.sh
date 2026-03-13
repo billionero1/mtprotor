@@ -11,6 +11,8 @@ CONF_DIR="/etc/mtproxy-fork"
 DATA_DIR="/var/lib/mtproxy-fork"
 ENV_FILE="/etc/default/mtproxy-fork"
 UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
+EXPIRE_SYNC_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.service"
+EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
@@ -25,6 +27,10 @@ ADMIN_SOCKET="$DATA_DIR/admin.sock"
 STATE_FILE="$DATA_DIR/secrets.tsv"
 CLEAN_OLD="yes"
 REFRESH_TG_CONFIG="yes"
+BOT_SSH_SETUP="yes"
+BOT_SSH_USER="mtproxybot"
+BOT_SSH_ALLOW_FROM="any"
+BOT_SSH_PASSWORD=""
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "Run as root: curl -fsSL <repo>/install.sh | sudo bash" >&2
@@ -78,6 +84,14 @@ die() {
 rand_hex16() {
   if command -v openssl >/dev/null 2>&1; then
     openssl rand -hex 16
+    return
+  fi
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+rand_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24
     return
   fi
   od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
@@ -228,6 +242,13 @@ else
 fi
 prompt_yes_no CLEAN_OLD "Delete old mtproxy/mtprotor installations first" "yes"
 prompt_yes_no REFRESH_TG_CONFIG "Refresh Telegram proxy-secret/proxy-multi.conf" "yes"
+prompt_yes_no BOT_SSH_SETUP "Configure SSH bot credentials (login/password) now" "yes"
+if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
+  prompt_nonempty BOT_SSH_USER "Bot SSH username" "$BOT_SSH_USER"
+  [[ "$BOT_SSH_USER" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]] || die "Invalid bot SSH username"
+  prompt_default BOT_SSH_ALLOW_FROM "Allowed bot source IP/CIDR (any for no restriction)" "$BOT_SSH_ALLOW_FROM"
+  BOT_SSH_PASSWORD="$(rand_password)"
+fi
 
 say "[1/9] Installing build dependencies..."
 export DEBIAN_FRONTEND=noninteractive
@@ -237,8 +258,8 @@ apt-get install -y --no-install-recommends \
 
 cleanup_old() {
   say "[2/9] Removing old services/processes/files..."
-  systemctl disable --now mtprotor.service MTProxy.service "$SERVICE_NAME" 2>/dev/null || true
-  rm -f "$UNIT_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
+  systemctl disable --now mtprotor.service MTProxy.service "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-fork-expire-sync.service 2>/dev/null || true
+  rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
   rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
@@ -315,6 +336,8 @@ chown mtproxy:mtproxy "$STATE_FILE"
 chmod 0640 "$STATE_FILE"
 
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
+install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.service" "$EXPIRE_SYNC_SERVICE_FILE"
+install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.timer" "$EXPIRE_SYNC_TIMER_FILE"
 install -m 0755 "$INSTALL_DIR/scripts/proxyctl" "$CTL_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/proxybot-dispatch" "$DISPATCH_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/mtproxybot-setup" "$BOT_SETUP_PATH"
@@ -324,9 +347,27 @@ exec /usr/local/bin/proxyctl menu "$@"
 MENU
 chmod 0755 "$MENU_PATH"
 
+BOT_SETUP_OUTPUT=""
+if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
+  say "[7.5/9] Configuring bot SSH profile..."
+  bot_cmd=("$BOT_SETUP_PATH" --user "$BOT_SSH_USER" --password "$BOT_SSH_PASSWORD")
+  if [[ "${BOT_SSH_ALLOW_FROM,,}" == "any" || -z "$BOT_SSH_ALLOW_FROM" ]]; then
+    bot_cmd+=(--allow-any)
+  else
+    bot_cmd+=(--allow-from "$BOT_SSH_ALLOW_FROM")
+  fi
+  if ! BOT_SETUP_OUTPUT="$("${bot_cmd[@]}")"; then
+    die "Failed to configure bot SSH profile"
+  fi
+  if [[ "$BOT_SETUP_OUTPUT" != *'"ok":true'* ]]; then
+    die "Bot SSH profile setup returned error: $BOT_SETUP_OUTPUT"
+  fi
+fi
+
 say "[8/9] Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
+systemctl enable --now mtproxy-fork-expire-sync.timer
 sleep 1
 
 say "[9/9] Post-checks..."
@@ -356,10 +397,23 @@ say
 say "Install complete"
 say "Service: systemctl status $SERVICE_NAME"
 say "Menu: mtproxymenu"
-say "Bot setup: mtproxybot-setup --user mtproxybot --password '<strong>' --allow-from <bot_ip>"
+say "Bot setup: mtproxybot-setup --show | mtproxybot-setup --regen-password --user mtproxybot"
 say "CLI: proxyctl status | proxyctl secret list"
 say "API socket: $ADMIN_SOCKET"
 say "API token: $ADMIN_TOKEN"
+if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
+  say "Bot SSH credentials:"
+  say "  host=${PUBLIC_HOST:-$(detect_public_host)}"
+  say "  port=22"
+  say "  username=$BOT_SSH_USER"
+  say "  password=$BOT_SSH_PASSWORD"
+  if [[ "${BOT_SSH_ALLOW_FROM,,}" == "any" || -z "$BOT_SSH_ALLOW_FROM" ]]; then
+    say "  allow_from=any"
+  else
+    say "  allow_from=$BOT_SSH_ALLOW_FROM"
+  fi
+  say "  check/rotate: proxyctl bot ssh show | proxyctl bot ssh rotate-password --user $BOT_SSH_USER"
+fi
 if [[ -n "$PUBLIC_HOST" ]]; then
   say "Bootstrap link (iOS paste): https://t.me/proxy?server=${PUBLIC_HOST}&port=${CLIENT_PORT}&secret=${LINK_SECRET}"
   say "Bootstrap deep-link: tg://proxy?server=${PUBLIC_HOST}&port=${CLIENT_PORT}&secret=${LINK_SECRET}"

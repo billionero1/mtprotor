@@ -1,0 +1,11 @@
+[Unit]
+Description=Run MTProxy Expire Sync Every Minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=mtproxy-fork-expire-sync.service
+
+[Install]
+WantedBy=timers.target

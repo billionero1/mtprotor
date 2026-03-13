@@ -25,7 +25,7 @@ proxyctl bot issue user_1001 --days 30
 ```
 Example:
 ```json
-{"ok":true,"secret":"<hex32>","expires":1770000000,"link":"https://t.me/proxy?..."}
+{"ok":true,"secret":"<hex32>","expires":1770000000,"active_until":"2026-05-01T00:00:00Z","link":"https://t.me/proxy?..."}
 ```
 
 ### Disable access
@@ -47,8 +47,11 @@ proxyctl bot revoke <hex32>
 
 If your bot UI needs `ip + username + password`, run:
 ```bash
-sudo mtproxybot-setup --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
+sudo mtproxybot-setup --show
+sudo mtproxybot-setup --regen-password --user mtproxybot --allow-from <BOT_SERVER_IP>
 ```
+
+On fresh install, credentials are auto-generated and printed by `install.sh`.
 
 This configures:
 - dedicated SSH user
@@ -75,6 +78,11 @@ ssh mtproxybot@<proxy-host> 'revoke <hex32>'
 2. Grace period / failed renewal -> `disable`.
 3. Payment restored -> `enable`.
 4. Final subscription end -> `revoke`.
+
+Runtime behavior:
+- Proxy checks expiry on handshake (`active_until`/`expires`) in-process.
+- After expiry, new connections are rejected automatically without restart.
+- `mtproxy-fork-expire-sync.timer` additionally marks expired secrets as `disabled` every minute.
 
 ## Error Handling
 - Non-zero exit code means operation failed.

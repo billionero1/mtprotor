@@ -30,8 +30,9 @@ Installer does:
 4. runtime user/dirs setup
 5. Telegram config download (`proxy-secret`, `proxy-multi.conf`)
 6. bootstrap secret + admin token setup
-7. systemd install and start
-8. health checks + ready links
+7. auto-generate bot SSH login/password (x3-ui style) + forced-command profile
+8. systemd install/start + expire-sync timer
+9. health checks + ready links
 
 After install:
 - service: `mtproxy-fork.service`
@@ -42,6 +43,8 @@ After install:
 - bot SSH password setup: `/usr/local/bin/mtproxybot-setup`
 - env/config: `/etc/default/mtproxy-fork`
 - secrets state: `/var/lib/mtproxy-fork/secrets.tsv`
+- bot credentials cache: `/etc/mtproxy-fork/bot-access.env`
+- expire timer: `mtproxy-fork-expire-sync.timer` (disables expired users)
 
 ## Telegram Link Format (iOS)
 For iOS clipboard import, use:
@@ -83,10 +86,12 @@ proxyctl link --secret <hex32>
 ### Secrets (users)
 ```bash
 proxyctl secret list
+proxyctl secret list --table
 proxyctl secret add <secret_hex_or_dd_or_ee> --label user123
 proxyctl secret disable <secret_hex>
 proxyctl secret enable <secret_hex>
 proxyctl secret remove <secret_hex>
+proxyctl secret expire-disable
 ```
 
 ### Auto issue user secret
@@ -96,6 +101,9 @@ proxyctl secret issue user123 --days 30
 ```
 
 This prints JSON with generated secret and ready `https://t.me/proxy?...` link.
+
+`active_until` is enforced by proxy runtime: after expiry, new handshakes are blocked automatically.
+Additionally, expire-sync timer runs every minute and marks expired secrets as disabled.
 
 ## Interactive Terminal Menu
 ```bash
@@ -107,12 +115,14 @@ proxyctl menu
 Menu includes:
 - service status/health/logs
 - default links
-- list users
+- list users (table: active/expired/disabled + active_until)
 - issue/disable/enable/remove user
 - change client port
 - change bootstrap secret
 - change public host
 - restart service
+- bot SSH settings (change login/password/allow-from)
+- force run expired-user disable
 
 When link-related params change, default links are reprinted.
 
@@ -141,9 +151,12 @@ Recommended production method: **SSH to proxy server and run `proxyctl bot ...`*
 
 If your third-party bot requires **IP + login + password**, use:
 ```bash
-sudo mtproxybot-setup --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
+sudo mtproxybot-setup --show
+sudo mtproxybot-setup --regen-password --user mtproxybot --allow-from <BOT_SERVER_IP>
 ```
 This returns JSON with connection parameters and enables forced command mode for safe command-only access.
+
+Installer already auto-generates these credentials and prints them once.
 
 Examples:
 ```bash
@@ -204,9 +217,13 @@ Binary path:
 
 ## Systemd Unit Template
 - `systemd/mtproxy-fork.service`
+- `systemd/mtproxy-fork-expire-sync.service`
+- `systemd/mtproxy-fork-expire-sync.timer`
 
 Installed unit:
 - `/etc/systemd/system/mtproxy-fork.service`
+- `/etc/systemd/system/mtproxy-fork-expire-sync.service`
+- `/etc/systemd/system/mtproxy-fork-expire-sync.timer`
 
 ## Current Limitation (Planned v2)
 `--slaves` + hot reload is not enabled yet. Planned next stage:

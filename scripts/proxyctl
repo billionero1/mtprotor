@@ -25,6 +25,7 @@ SOCK="${MTPROXY_SOCKET:-$ADMIN_SOCKET}"
 TOKEN="${MTPROXY_TOKEN:-$ADMIN_TOKEN}"
 BOT_MODE=0
 BOT_SETUP_BIN="${MTPROXY_BOT_SETUP_BIN:-/usr/local/bin/mtproxybot-setup}"
+BOT_CRED_FILE="${MTPROXY_BOT_CRED_FILE:-/etc/mtproxy-fork/bot-access.env}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'
@@ -85,12 +86,13 @@ Usage:
   proxyctl config set admin-token <token>
   proxyctl config set secret-prefix <dd|plain>
 
-  proxyctl secret list
+  proxyctl secret list [--table]
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
   proxyctl secret issue <label> [--days <n> | --expires <unix_ts>] [--prefix dd|plain|ee]
   proxyctl secret remove <secret>
   proxyctl secret enable <secret>
   proxyctl secret disable <secret>
+  proxyctl secret expire-disable
 
   proxyctl bot health
   proxyctl bot issue <label> [--days <n>]
@@ -98,6 +100,10 @@ Usage:
   proxyctl bot enable <secret>
   proxyctl bot revoke <secret>
   proxyctl bot setup-password [--user <name>] [--password <pass>] [--allow-from <ip_or_cidr>]
+  proxyctl bot ssh show
+  proxyctl bot ssh rotate-password [--user <name>] [--allow-from <ip_or_cidr>|--allow-any]
+  proxyctl bot ssh set --user <name> [--password <pass>] [--allow-from <ip_or_cidr>|--allow-any]
+  proxyctl bot ssh allow-from --user <name> [--allow-from <ip_or_cidr>|--allow-any]
 
   proxyctl menu
 
@@ -184,6 +190,72 @@ api() {
   ensure_socket
   request "$@"
   echo
+}
+
+iso_utc_from_unix() {
+  local ts="${1:-0}"
+  if [[ ! "$ts" =~ ^[0-9]+$ ]] || (( ts <= 0 )); then
+    echo "-"
+    return 0
+  fi
+  date -u -d "@$ts" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "$ts"
+}
+
+secrets_json_rows() {
+  local json="${1:-}"
+  echo "$json" \
+    | tr -d '\n' \
+    | sed -e 's/^.*"secrets":[[]//' -e 's/[]][[:space:]]*}.*$//' -e 's/},{/}\n{/g'
+}
+
+secret_row_field() {
+  local row="$1"
+  local key="$2"
+  case "$key" in
+    secret)
+      echo "$row" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p'
+      ;;
+    enabled)
+      echo "$row" | sed -n 's/.*"enabled":\([a-z]*\).*/\1/p'
+      ;;
+    active)
+      echo "$row" | sed -n 's/.*"active":\([a-z]*\).*/\1/p'
+      ;;
+    expires)
+      echo "$row" | sed -n 's/.*"expires":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    label)
+      echo "$row" | sed -n 's/.*"label":"\([^"]*\)".*/\1/p'
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+load_bot_credentials() {
+  local host user pass allow
+  host=""
+  user=""
+  pass=""
+  allow=""
+  if [[ -r "$BOT_CRED_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$BOT_CRED_FILE"
+    host="${BOT_SSH_HOST:-}"
+    user="${BOT_SSH_USER:-}"
+    pass="${BOT_SSH_PASSWORD:-}"
+    allow="${BOT_SSH_ALLOW_FROM:-}"
+  fi
+  printf '%s|%s|%s|%s\n' "$host" "$user" "$pass" "$allow"
+}
+
+bot_setup_exec() {
+  require_root
+  if [[ ! -x "$BOT_SETUP_BIN" ]]; then
+    die "bot setup tool not found: $BOT_SETUP_BIN"
+  fi
+  "$BOT_SETUP_BIN" "$@"
 }
 
 service_cmd() {
@@ -474,6 +546,75 @@ cmd_config_set() {
   esac
 }
 
+cmd_secret_list_table() {
+  local json now
+  ensure_socket
+  json="$(request GET /v1/secrets)"
+  now="$(date +%s)"
+
+  printf '%-10s %-8s %-8s %-20s %-32s %s\n' "STATUS" "ENABLED" "ACTIVE" "ACTIVE_UNTIL(UTC)" "SECRET" "LABEL"
+
+  local rows row
+  rows="$(secrets_json_rows "$json")"
+  if [[ -z "$rows" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    local secret enabled active expires label until status color
+    secret="$(secret_row_field "$row" secret)"
+    enabled="$(secret_row_field "$row" enabled)"
+    active="$(secret_row_field "$row" active)"
+    expires="$(secret_row_field "$row" expires)"
+    label="$(secret_row_field "$row" label)"
+    until="$(iso_utc_from_unix "$expires")"
+    status="INACTIVE"
+    color="$C_YELLOW"
+    if [[ "$active" == "true" ]]; then
+      status="ACTIVE"
+      color="$C_GREEN"
+    elif [[ "$enabled" == "false" ]]; then
+      status="DISABLED"
+      color="$C_RED"
+    elif [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 && now >= expires )); then
+      status="EXPIRED"
+      color="$C_YELLOW"
+    fi
+    printf '%-10s %-8s %-8s %-20s %-32s %s\n' \
+      "$(paint "$color" "$status")" "$enabled" "$active" "$until" "$secret" "$label"
+  done <<<"$rows"
+}
+
+cmd_secret_expire_disable() {
+  local json now
+  ensure_socket
+  json="$(request GET /v1/secrets)"
+  now="$(date +%s)"
+  local disabled=0
+  local checked=0
+
+  local rows row
+  rows="$(secrets_json_rows "$json")"
+  if [[ -n "$rows" ]]; then
+    while IFS= read -r row; do
+      [[ -n "$row" ]] || continue
+      local secret enabled expires
+      secret="$(secret_row_field "$row" secret)"
+      enabled="$(secret_row_field "$row" enabled)"
+      expires="$(secret_row_field "$row" expires)"
+      (( checked += 1 ))
+      if [[ "$enabled" == "true" && "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 && now >= expires )); then
+        if request PATCH "/v1/secrets/$secret/disable" >/dev/null 2>&1; then
+          (( disabled += 1 ))
+        fi
+      fi
+    done <<<"$rows"
+  fi
+
+  printf '{"ok":true,"checked":%d,"disabled":%d,"now":%s}\n' "$checked" "$disabled" "$now"
+}
+
 cmd_secret_add() {
   local secret="$1"
   shift
@@ -538,16 +679,25 @@ cmd_secret_issue() {
   [[ -n "$host" ]] || host="$(detect_public_host)"
   local out_secret
   out_secret="$(link_secret "$secret" "$prefix")"
+  local active_until=""
+  if [[ "$expires" =~ ^[0-9]+$ ]] && (( expires > 0 )); then
+    active_until="$(date -u -d "@$expires" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+  fi
 
-  printf '{"ok":true,"secret":"%s","expires":%s,"link":"https://t.me/proxy?server=%s&port=%s&secret=%s"}\n' \
-    "$secret" "$expires" "$host" "$CLIENT_PORT" "$out_secret"
+  printf '{"ok":true,"secret":"%s","expires":%s,"active_until":"%s","link":"https://t.me/proxy?server=%s&port=%s&secret=%s"}\n' \
+    "$secret" "$expires" "$active_until" "$host" "$CLIENT_PORT" "$out_secret"
 }
 
 cmd_secret() {
   local sub="${1:-}"
   case "$sub" in
     list)
-      api GET /v1/secrets
+      local mode="${2:-}"
+      if [[ "$mode" == "--table" ]]; then
+        cmd_secret_list_table
+      else
+        api GET /v1/secrets
+      fi
       ;;
     add)
       local secret="${2:-}"
@@ -576,8 +726,37 @@ cmd_secret() {
       [[ -n "$secret_dis" ]] || die "Usage: proxyctl secret disable <secret>"
       api PATCH "/v1/secrets/$secret_dis/disable"
       ;;
+    expire-disable|sync-expired)
+      cmd_secret_expire_disable
+      ;;
     *)
       die "Unknown secret action: $sub"
+      ;;
+  esac
+}
+
+cmd_bot_ssh() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    show)
+      BOT_MODE=0
+      bot_setup_exec --show "$@"
+      ;;
+    rotate-password)
+      BOT_MODE=0
+      bot_setup_exec --regen-password "$@"
+      ;;
+    set)
+      BOT_MODE=0
+      bot_setup_exec "$@"
+      ;;
+    allow-from)
+      BOT_MODE=0
+      bot_setup_exec --keep-password "$@"
+      ;;
+    *)
+      die "Usage: proxyctl bot ssh show | rotate-password [opts] | set <opts> | allow-from <opts>"
       ;;
   esac
 }
@@ -610,14 +789,15 @@ cmd_bot() {
       [[ -n "$secr" ]] || die "Usage: proxyctl bot revoke <secret>"
       api DELETE "/v1/secrets/$secr"
       ;;
+    ssh)
+      BOT_MODE=0
+      shift
+      cmd_bot_ssh "$@"
+      ;;
     setup-password)
       BOT_MODE=0
-      require_root
       shift
-      if [[ ! -x "$BOT_SETUP_BIN" ]]; then
-        die "bot setup tool not found: $BOT_SETUP_BIN"
-      fi
-      "$BOT_SETUP_BIN" "$@"
+      bot_setup_exec "$@"
       ;;
     *)
       die "Unknown bot action: $sub"
@@ -644,13 +824,99 @@ menu_header() {
   echo "=================================================="
 }
 
+menu_bot_settings() {
+  while true; do
+    local cred host user pass allow
+    cred="$(load_bot_credentials)"
+    IFS='|' read -r host user pass allow <<<"$cred"
+    user="${user:-mtproxybot}"
+    echo
+    echo "-------- $(paint "$C_BOLD" "Bot SSH Settings") --------"
+    run_safe cmd_bot_ssh show
+    if [[ -z "$pass" ]]; then
+      echo "$(paint "$C_YELLOW" "[NOTE]") saved password is empty/unknown; rotate to issue a new one."
+    fi
+    echo "1) Rotate bot password"
+    echo "2) Change bot username/password"
+    echo "3) Change allow-from IP/CIDR (keep current password)"
+    echo "0) Back"
+    printf "Select: "
+    IFS= read -r bchoice || true
+    case "$bchoice" in
+      1)
+        printf "Username [%s]: " "$user"
+        IFS= read -r buser || true
+        buser="${buser:-$user}"
+        printf "Allow-from (empty=keep, any=clear): "
+        IFS= read -r ballow || true
+        local -a args
+        args=(--user "$buser")
+        if [[ "${ballow,,}" == "any" ]]; then
+          args+=(--allow-any)
+        elif [[ -n "$ballow" ]]; then
+          args+=(--allow-from "$ballow")
+        fi
+        run_safe cmd_bot_ssh rotate-password "${args[@]}"
+        ;;
+      2)
+        printf "New username [%s]: " "$user"
+        IFS= read -r nuser || true
+        nuser="${nuser:-$user}"
+        printf "Password (empty=auto-generate): "
+        IFS= read -r npass || true
+        printf "Allow-from (empty=keep, any=clear): "
+        IFS= read -r nallow || true
+        local -a set_args
+        set_args=(--user "$nuser")
+        if [[ -n "$npass" ]]; then
+          set_args+=(--password "$npass")
+        fi
+        if [[ "${nallow,,}" == "any" ]]; then
+          set_args+=(--allow-any)
+        elif [[ -n "$nallow" ]]; then
+          set_args+=(--allow-from "$nallow")
+        fi
+        run_safe cmd_bot_ssh set "${set_args[@]}"
+        ;;
+      3)
+        printf "Username [%s]: " "$user"
+        IFS= read -r auser || true
+        auser="${auser:-$user}"
+        printf "New allow-from (CIDR/IP or any): "
+        IFS= read -r aallow || true
+        if [[ -z "$aallow" ]]; then
+          warn "allow-from value is required"
+          continue
+        fi
+        local -a allow_args
+        allow_args=(--user "$auser")
+        if [[ "${aallow,,}" == "any" ]]; then
+          allow_args+=(--allow-any)
+        else
+          allow_args+=(--allow-from "$aallow")
+        fi
+        run_safe cmd_bot_ssh allow-from "${allow_args[@]}"
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        warn "Unknown option"
+        ;;
+    esac
+    echo
+    printf "Press Enter to continue... "
+    IFS= read -r _ || true
+  done
+}
+
 menu_cmd() {
   while true; do
     menu_header
     echo "1) Quick service summary"
     echo "2) Health check (JSON)"
     echo "3) Show default links"
-    echo "4) List users (JSON)"
+    echo "4) List users (table)"
     echo "5) Issue new user (secret + link)"
     echo "6) Disable user"
     echo "7) Enable user"
@@ -661,6 +927,8 @@ menu_cmd() {
     echo "12) Restart service"
     echo "13) Show service logs (last 120)"
     echo "14) Full systemd status"
+    echo "15) Bot SSH settings (login/password/IP)"
+    echo "16) Disable expired users now"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
@@ -676,7 +944,7 @@ menu_cmd() {
         run_safe cmd_link
         ;;
       4)
-        run_safe cmd_secret list
+        run_safe cmd_secret list --table
         ;;
       5)
         printf "Label: "
@@ -728,6 +996,12 @@ menu_cmd() {
         ;;
       14)
         run_safe service_cmd status --full
+        ;;
+      15)
+        run_safe menu_bot_settings
+        ;;
+      16)
+        run_safe cmd_secret expire-disable
         ;;
       0)
         exit 0

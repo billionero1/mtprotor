@@ -3,6 +3,8 @@ set -euo pipefail
 
 SERVICE_NAME="mtproxy-fork"
 UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
+EXPIRE_SYNC_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.service"
+EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
@@ -33,14 +35,14 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   exit 1
 fi
 
-systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
-rm -f "$UNIT_FILE"
+systemctl disable --now "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-fork-expire-sync.service 2>/dev/null || true
+rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE"
 systemctl daemon-reload
 
 rm -f "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
 
 if (( PURGE_DATA )); then
-  rm -rf "$CONF_DIR" "$DATA_DIR" "$ENV_FILE"
+  rm -rf "$CONF_DIR" "$DATA_DIR" "$ENV_FILE" /etc/mtproxy-fork/bot-access.env
   if id -u mtproxy >/dev/null 2>&1; then
     userdel mtproxy 2>/dev/null || true
   fi

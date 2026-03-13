@@ -4,9 +4,96 @@ set -euo pipefail
 USER_NAME="mtproxybot"
 PASSWORD=""
 ALLOW_FROM=""
+ALLOW_SET=0
 SHOW_JSON=1
+SHOW_ONLY=0
+KEEP_PASSWORD=0
+REGEN_PASSWORD=0
 DISPATCH_BIN="/usr/local/bin/proxybot-dispatch"
 CONF_DIR="/etc/ssh/sshd_config.d"
+PROFILE_GLOB="$CONF_DIR/90-*-mtproxybot.conf"
+CRED_FILE="/etc/mtproxy-fork/bot-access.env"
+
+detect_host() {
+  local h
+  h="$(curl -4 -fsSL --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  if [[ -n "$h" ]]; then
+    echo "$h"
+    return
+  fi
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+rand_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    # Alnum-only to simplify transport into 3rd-party bot settings.
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24
+    return
+  fi
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+read_match_line_allow() {
+  local conf="$1"
+  [[ -r "$conf" ]] || return 0
+  awk '
+    BEGIN { out="" }
+    $1 == "Match" && $2 == "User" {
+      if (NF >= 5 && $4 == "Address") {
+        out=$5
+      } else {
+        out=""
+      }
+      print out
+      exit 0
+    }
+  ' "$conf"
+}
+
+show_profile() {
+  local host user allow pass conf
+  host="$(detect_host)"
+  user="$USER_NAME"
+  allow=""
+  pass=""
+
+  conf="$CONF_DIR/90-${user}-mtproxybot.conf"
+  if [[ ! -r "$conf" ]]; then
+    conf="$(ls $PROFILE_GLOB 2>/dev/null | head -n1 || true)"
+  fi
+  if [[ -r "$conf" ]]; then
+    local parsed_user
+    parsed_user="$(sed -n 's/^Match[[:space:]]\+User[[:space:]]\+\([^[:space:]]\+\).*/\1/p' "$conf" | head -n1)"
+    [[ -n "$parsed_user" ]] && user="$parsed_user"
+    allow="$(read_match_line_allow "$conf")"
+  fi
+
+  if [[ -r "$CRED_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CRED_FILE"
+    if [[ -n "${BOT_SSH_USER:-}" ]]; then
+      user="$BOT_SSH_USER"
+    fi
+    if [[ -n "${BOT_SSH_PASSWORD:-}" ]]; then
+      pass="$BOT_SSH_PASSWORD"
+    fi
+    if [[ -n "${BOT_SSH_ALLOW_FROM+x}" ]]; then
+      allow="${BOT_SSH_ALLOW_FROM:-}"
+    fi
+  fi
+
+  if (( SHOW_JSON )); then
+    printf '{"ok":true,"host":"%s","port":22,"username":"%s","password":"%s","allow_from":"%s"}\n' \
+      "$host" "$user" "$pass" "$allow"
+  else
+    echo "OK"
+    echo "host=$host"
+    echo "port=22"
+    echo "username=$user"
+    echo "password=$pass"
+    echo "allow_from=$allow"
+  fi
+}
 
 die() {
   printf '{"ok":false,"error":"%s"}\n' "$1"
@@ -24,7 +111,15 @@ while [[ $# -gt 0 ]]; do
     --password)
       PASSWORD="${2:-}"; shift 2 ;;
     --allow-from)
-      ALLOW_FROM="${2:-}"; shift 2 ;;
+      ALLOW_FROM="${2:-}"; ALLOW_SET=1; shift 2 ;;
+    --allow-any)
+      ALLOW_FROM=""; ALLOW_SET=1; shift ;;
+    --show)
+      SHOW_ONLY=1; shift ;;
+    --keep-password)
+      KEEP_PASSWORD=1; shift ;;
+    --regen-password)
+      REGEN_PASSWORD=1; shift ;;
     --text)
       SHOW_JSON=0; shift ;;
     *)
@@ -36,31 +131,70 @@ done
 [[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]] || die "invalid user name"
 [[ -x "$DISPATCH_BIN" ]] || die "missing $DISPATCH_BIN"
 
-if [[ -z "$PASSWORD" ]]; then
-  if command -v openssl >/dev/null 2>&1; then
-    PASSWORD="$(openssl rand -hex 12)"
-  else
-    PASSWORD="$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
-  fi
+if (( SHOW_ONLY )); then
+  show_profile
+  exit 0
 fi
 
-[[ ${#PASSWORD} -ge 10 ]] || die "password too short (min 10 chars)"
+if (( REGEN_PASSWORD )) && [[ -n "$PASSWORD" ]]; then
+  die "use either --password or --regen-password"
+fi
+
+if [[ -n "$PASSWORD" ]]; then
+  [[ ${#PASSWORD} -ge 10 ]] || die "password too short (min 10 chars)"
+fi
 
 if ! getent group mtproxy >/dev/null 2>&1; then
   die "group mtproxy not found; install mtproxy first"
 fi
 
+user_exists=0
 if id -u "$USER_NAME" >/dev/null 2>&1; then
-  true
+  user_exists=1
 else
   useradd -m -s /bin/bash "$USER_NAME"
 fi
 
-echo "$USER_NAME:$PASSWORD" | chpasswd
+set_password=0
+if [[ -n "$PASSWORD" ]]; then
+  set_password=1
+elif (( REGEN_PASSWORD )); then
+  PASSWORD="$(rand_password)"
+  set_password=1
+elif (( user_exists == 0 )); then
+  PASSWORD="$(rand_password)"
+  set_password=1
+elif (( KEEP_PASSWORD )); then
+  set_password=0
+else
+  PASSWORD="$(rand_password)"
+  set_password=1
+fi
+
+if (( set_password )); then
+  echo "$USER_NAME:$PASSWORD" | chpasswd
+fi
+
 usermod -aG mtproxy "$USER_NAME"
 
 install -d -m 0755 "$CONF_DIR"
 CONF_FILE="$CONF_DIR/90-${USER_NAME}-mtproxybot.conf"
+
+for old_conf in $PROFILE_GLOB; do
+  [[ -e "$old_conf" ]] || continue
+  if [[ "$old_conf" != "$CONF_FILE" ]]; then
+    rm -f "$old_conf"
+  fi
+done
+
+if (( ALLOW_SET == 0 )); then
+  if [[ -r "$CONF_FILE" ]]; then
+    ALLOW_FROM="$(read_match_line_allow "$CONF_FILE")"
+  else
+    ALLOW_FROM=""
+  fi
+fi
+
 MATCH_LINE="Match User $USER_NAME"
 if [[ -n "$ALLOW_FROM" ]]; then
   MATCH_LINE="Match User $USER_NAME Address $ALLOW_FROM"
@@ -93,10 +227,29 @@ else
   die "ssh service not active"
 fi
 
-HOST="$(curl -4 -fsSL --max-time 4 https://api.ipify.org 2>/dev/null || true)"
-if [[ -z "$HOST" ]]; then
-  HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+HOST="$(detect_host)"
+
+if [[ ! -d /etc/mtproxy-fork ]]; then
+  install -d -m 0750 /etc/mtproxy-fork
 fi
+
+if [[ -z "$PASSWORD" && -r "$CRED_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CRED_FILE"
+  PASSWORD="${BOT_SSH_PASSWORD:-}"
+fi
+
+tmp_cred="$(mktemp)"
+{
+  printf 'BOT_SSH_HOST=%q\n' "$HOST"
+  printf 'BOT_SSH_PORT=%q\n' "22"
+  printf 'BOT_SSH_USER=%q\n' "$USER_NAME"
+  printf 'BOT_SSH_PASSWORD=%q\n' "$PASSWORD"
+  printf 'BOT_SSH_ALLOW_FROM=%q\n' "$ALLOW_FROM"
+  printf 'BOT_SSH_UPDATED_AT=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$tmp_cred"
+install -m 0600 -o root -g root "$tmp_cred" "$CRED_FILE"
+rm -f "$tmp_cred"
 
 if (( SHOW_JSON )); then
   printf '{"ok":true,"host":"%s","port":22,"username":"%s","password":"%s","allow_from":"%s"}\n' \
