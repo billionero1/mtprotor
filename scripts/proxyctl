@@ -5,6 +5,7 @@ ENV_FILE="${MTPROXY_ENV_FILE:-/etc/default/mtproxy-fork}"
 SERVICE_NAME="${MTPROXY_SERVICE:-mtproxy-fork}"
 BRAND_NAME="${MTPROXY_BRAND_NAME:-Bulldog Proxy}"
 BRAND_CONSOLE="${MTPROXY_BRAND_CONSOLE:-Bulldog Control Console}"
+BRAND_RUNTIME_ID="${MTPROXY_RUNTIME_ID:-bulldog-runtime}"
 
 load_env() {
   if [[ -r "$ENV_FILE" ]]; then
@@ -116,6 +117,10 @@ Env overrides:
   MTPROXY_ENV_FILE=/etc/default/mtproxy-fork
   MTPROXY_SOCKET=/var/lib/mtproxy-fork/admin.sock
   MTPROXY_TOKEN=<admin token>
+
+Brand wrappers:
+  dogctl ...   (wrapper for proxyctl ...)
+  dogmenu      (wrapper for proxyctl console)
 USAGE
 }
 
@@ -385,7 +390,7 @@ print_service_summary() {
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
   echo "Runtime      : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
-  echo "Unit         : $SERVICE_NAME"
+  echo "Runtime ID   : $BRAND_RUNTIME_ID"
   echo "Main PID     : $(paint "$C_CYAN" "$pid")"
   echo "Started      : $start_ts"
   echo "Memory       : $(fmt_bytes "$mem")"
@@ -399,8 +404,8 @@ print_service_summary_json() {
   local snap active substate pid start_ts mem cpu listen host total active_secrets
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
-  printf '{\"brand\":\"%s\",\"service\":\"%s\",\"active\":\"%s\",\"substate\":\"%s\",\"pid\":%s,\"started\":\"%s\",\"memory_bytes\":%s,\"cpu_nsec\":%s,\"client_port\":%s,\"listening\":\"%s\",\"public_host\":\"%s\",\"secrets_total\":%s,\"secrets_active\":%s}\n' \
-    "$(json_escape "$BRAND_NAME")" "$SERVICE_NAME" "$active" "$substate" "$pid" "$(json_escape "$start_ts")" "$mem" "$cpu" "$CLIENT_PORT" "$listen" "$(json_escape "$host")" "$total" "$active_secrets"
+  printf '{\"brand\":\"%s\",\"runtime_id\":\"%s\",\"service\":\"%s\",\"active\":\"%s\",\"substate\":\"%s\",\"pid\":%s,\"started\":\"%s\",\"memory_bytes\":%s,\"cpu_nsec\":%s,\"client_port\":%s,\"listening\":\"%s\",\"public_host\":\"%s\",\"secrets_total\":%s,\"secrets_active\":%s}\n' \
+    "$(json_escape "$BRAND_NAME")" "$(json_escape "$BRAND_RUNTIME_ID")" "$SERVICE_NAME" "$active" "$substate" "$pid" "$(json_escape "$start_ts")" "$mem" "$cpu" "$CLIENT_PORT" "$listen" "$(json_escape "$host")" "$total" "$active_secrets"
 }
 
 cmd_status() {
@@ -824,7 +829,7 @@ menu_header() {
   echo
   echo "=========== $(paint "$C_BOLD" "$BRAND_CONSOLE") ==========="
   echo "Runtime   : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
-  echo "Unit      : $SERVICE_NAME  PID: $(paint "$C_CYAN" "$pid")"
+  echo "Node      : $BRAND_RUNTIME_ID  PID: $(paint "$C_CYAN" "$pid")"
   echo "Endpoint  : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
   echo "Users     : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
   echo "Started   : $start_ts (UTC)"

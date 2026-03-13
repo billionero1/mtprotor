@@ -37,8 +37,8 @@ Installer does:
 After install:
 - service: `mtproxy-fork.service`
 - binary: `/usr/local/bin/mtproto-proxy-fork`
-- CLI: `/usr/local/bin/proxyctl`
-- menu: `/usr/local/bin/mtproxymenu`
+- CLI: `/usr/local/bin/dogctl` (compat: `/usr/local/bin/proxyctl`)
+- menu: `/usr/local/bin/dogmenu` (compat: `/usr/local/bin/mtproxymenu`)
 - bot SSH dispatcher: `/usr/local/bin/proxybot-dispatch`
 - bot SSH password setup: `/usr/local/bin/mtproxybot-setup`
 - env/config: `/etc/default/mtproxy-fork`
@@ -66,6 +66,9 @@ Optional flags:
 
 ### Service
 ```bash
+dogctl runtime status
+dogctl runtime restart
+dogctl runtime logs
 proxyctl runtime status
 proxyctl runtime restart
 proxyctl runtime logs
@@ -79,6 +82,7 @@ proxyctl health
 
 `proxyctl service status` is compact by default (active status, PID, memory, CPU, listener, secret counters).
 `proxyctl runtime ...` is a branding alias for the same operations.
+`dogctl ...` is a brand wrapper over `proxyctl ...`.
 
 ### Links
 ```bash
@@ -111,15 +115,15 @@ Additionally, expire-sync timer runs every minute and marks expired secrets as d
 
 ## Interactive Terminal Menu
 ```bash
+dogmenu
+# or
 mtproxymenu
 # or
-proxyctl menu
-# or
-proxyctl console
+dogctl console
 ```
 
 Menu includes:
-- service status/health/logs
+- runtime status/health/logs
 - default links
 - list users (table: active/expired/disabled + active_until)
 - issue/disable/enable/remove user

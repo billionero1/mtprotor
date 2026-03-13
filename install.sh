@@ -16,6 +16,8 @@ EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 CTL_PATH="/usr/local/bin/proxyctl"
 MENU_PATH="/usr/local/bin/mtproxymenu"
+DOG_MENU_PATH="/usr/local/bin/dogmenu"
+DOG_CTL_PATH="/usr/local/bin/dogctl"
 DISPATCH_PATH="/usr/local/bin/proxybot-dispatch"
 BOT_SETUP_PATH="/usr/local/bin/mtproxybot-setup"
 
@@ -262,7 +264,7 @@ cleanup_old() {
   rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
-  rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
+  rm -f "$ENV_FILE" "$BIN_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
   systemctl daemon-reload || true
 }
 
@@ -339,11 +341,13 @@ install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.service" "$EXPIRE_SYNC_SERVICE_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.timer" "$EXPIRE_SYNC_TIMER_FILE"
 install -m 0755 "$INSTALL_DIR/scripts/proxyctl" "$CTL_PATH"
+install -m 0755 "$INSTALL_DIR/scripts/dogctl" "$DOG_CTL_PATH"
+install -m 0755 "$INSTALL_DIR/scripts/dogmenu" "$DOG_MENU_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/proxybot-dispatch" "$DISPATCH_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/mtproxybot-setup" "$BOT_SETUP_PATH"
 cat > "$MENU_PATH" <<'MENU'
 #!/usr/bin/env bash
-exec /usr/local/bin/proxyctl menu "$@"
+exec /usr/local/bin/dogmenu "$@"
 MENU
 chmod 0755 "$MENU_PATH"
 
@@ -395,10 +399,10 @@ fi
 
 say
 say "Install complete"
-say "Service: systemctl status $SERVICE_NAME"
-say "Menu: mtproxymenu"
+say "Runtime: $SERVICE_NAME (systemd unit)"
+say "Console: dogmenu (compat: mtproxymenu)"
+say "CLI: dogctl runtime status (compat: proxyctl runtime status)"
 say "Bot setup: mtproxybot-setup --show | mtproxybot-setup --regen-password --user mtproxybot"
-say "CLI: proxyctl status | proxyctl secret list"
 say "API socket: $ADMIN_SOCKET"
 say "API token: $ADMIN_TOKEN"
 if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
