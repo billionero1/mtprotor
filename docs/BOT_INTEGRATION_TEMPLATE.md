@@ -53,6 +53,14 @@ sudo mtproxybot-setup --regen-password --user mtproxybot --allow-from <BOT_SERVE
 
 On fresh install, credentials are auto-generated and printed by `install.sh`.
 
+Credential management:
+```bash
+proxyctl bot ssh show
+proxyctl bot ssh rotate-password --user mtproxybot --allow-from <BOT_SERVER_IP>
+proxyctl bot ssh allow-from --user mtproxybot --allow-any
+proxyctl bot ssh set --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
+```
+
 This configures:
 - dedicated SSH user
 - membership in `mtproxy` group (socket access)

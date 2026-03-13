@@ -158,6 +158,14 @@ This returns JSON with connection parameters and enables forced command mode for
 
 Installer already auto-generates these credentials and prints them once.
 
+Manage SSH bot credentials later:
+```bash
+proxyctl bot ssh show
+proxyctl bot ssh rotate-password --user mtproxybot --allow-from <BOT_SERVER_IP>
+proxyctl bot ssh allow-from --user mtproxybot --allow-any
+proxyctl bot ssh set --user mtproxybot --password '<STRONG_PASSWORD>' --allow-from <BOT_SERVER_IP>
+```
+
 Examples:
 ```bash
 ssh bulldogtg1 "proxyctl bot health"
