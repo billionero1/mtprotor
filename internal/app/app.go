@@ -155,31 +155,66 @@ func runSecretList(args []string) int {
 }
 
 func runSecretAdd(args []string) int {
-	fs := flag.NewFlagSet("secret add", flag.ContinueOnError)
-	label := fs.String("label", "", "Secret label")
-	tlsDomain := fs.String("tls-domain", "", "TLS domain (for ee transport mode)")
-	disabled := fs.Bool("disabled", false, "Create secret in disabled state")
-	expiresAt := fs.String("expires-at", "", "RFC3339 UTC expiration")
-	maxConn := fs.Int("max-connections", 0, "Max concurrent connections (0 = unlimited)")
-	socket := fs.String("socket", "", "Path to admin unix socket")
-	configPath := fs.String("config", "/etc/mtprotor/config.json", "Path to config file")
-	if err := fs.Parse(args); err != nil {
+	type addSecretFlags struct {
+		label      *string
+		tlsDomain  *string
+		disabled   *bool
+		expiresAt  *string
+		maxConn    *int
+		socket     *string
+		configPath *string
+	}
+
+	newFlagSet := func() (*flag.FlagSet, addSecretFlags) {
+		fs := flag.NewFlagSet("secret add", flag.ContinueOnError)
+		f := addSecretFlags{
+			label:      fs.String("label", "", "Secret label"),
+			tlsDomain:  fs.String("tls-domain", "", "TLS domain (for ee transport mode)"),
+			disabled:   fs.Bool("disabled", false, "Create secret in disabled state"),
+			expiresAt:  fs.String("expires-at", "", "RFC3339 UTC expiration"),
+			maxConn:    fs.Int("max-connections", 0, "Max concurrent connections (0 = unlimited)"),
+			socket:     fs.String("socket", "", "Path to admin unix socket"),
+			configPath: fs.String("config", "/etc/mtprotor/config.json", "Path to config file"),
+		}
+		return fs, f
+	}
+
+	parse := func(argv []string) (*flag.FlagSet, addSecretFlags, error) {
+		fs, f := newFlagSet()
+		if err := fs.Parse(argv); err != nil {
+			return nil, addSecretFlags{}, err
+		}
+		return fs, f, nil
+	}
+
+	fs, f, err := parse(args)
+	if err != nil {
 		return 1
 	}
+
+	// Backward-compatible UX: allow "secret add <secret> --label x" in addition to Go-flag style.
+	if fs.NArg() != 1 && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		reordered := append([]string{}, args[1:]...)
+		reordered = append(reordered, args[0])
+		if fs2, f2, err := parse(reordered); err == nil && fs2.NArg() == 1 {
+			fs, f = fs2, f2
+		}
+	}
+
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: mtprotor secret add <secret_hex> [--label ...]")
 		return 1
 	}
 
-	sock, err := resolveSocket(*socket, *configPath)
+	sock, err := resolveSocket(*f.socket, *f.configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 
 	var exp *time.Time
-	if strings.TrimSpace(*expiresAt) != "" {
-		t, err := time.Parse(time.RFC3339, *expiresAt)
+	if strings.TrimSpace(*f.expiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, *f.expiresAt)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "invalid --expires-at: %v\n", err)
 			return 1
@@ -191,11 +226,11 @@ func runSecretAdd(args []string) int {
 	cli := client.New(sock)
 	item, err := cli.AddSecret(context.Background(), runtime.AddSecretInput{
 		Secret:         fs.Arg(0),
-		TLSDomain:      *tlsDomain,
-		Label:          *label,
-		Enabled:        !*disabled,
+		TLSDomain:      *f.tlsDomain,
+		Label:          *f.label,
+		Enabled:        !*f.disabled,
 		ExpiresAt:      exp,
-		MaxConnections: *maxConn,
+		MaxConnections: *f.maxConn,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "add failed: %v\n", err)
