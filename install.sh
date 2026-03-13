@@ -144,17 +144,17 @@ prompt_port() {
   local __var="$1"
   local question="$2"
   local def="$3"
-  local val
+  local input=""
   while true; do
-    prompt_default val "$question" "$def"
-    if require_port "$val"; then
-      printf -v "$__var" '%s' "$val"
+    prompt_default input "$question" "$def"
+    if require_port "$input"; then
+      printf -v "$__var" '%s' "$input"
       return 0
     fi
     if (( ! is_interactive )); then
-      die "Invalid non-interactive value for $question: $val"
+      die "Invalid non-interactive value for $question: $input"
     fi
-    warn "Invalid port: $val"
+    warn "Invalid port: $input"
   done
 }
 
@@ -162,11 +162,11 @@ prompt_hex32() {
   local __var="$1"
   local question="$2"
   local def="$3"
-  local val
+  local input=""
   while true; do
-    prompt_default val "$question" "$def"
-    if require_hex32 "$val"; then
-      printf -v "$__var" '%s' "${val,,}"
+    prompt_default input "$question" "$def"
+    if require_hex32 "$input"; then
+      printf -v "$__var" '%s' "${input,,}"
       return 0
     fi
     if (( ! is_interactive )); then
@@ -180,11 +180,11 @@ prompt_nonempty() {
   local __var="$1"
   local question="$2"
   local def="$3"
-  local val
+  local input=""
   while true; do
-    prompt_default val "$question" "$def"
-    if [[ -n "$val" ]]; then
-      printf -v "$__var" '%s' "$val"
+    prompt_default input "$question" "$def"
+    if [[ -n "$input" ]]; then
+      printf -v "$__var" '%s' "$input"
       return 0
     fi
     if (( ! is_interactive )); then
