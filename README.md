@@ -10,10 +10,30 @@ Added options:
 - `--admin-token <token>`: optional token for admin commands.
 
 Notes:
-- Hot-reload mode is single-process only (`--admin-socket` is not supported with `--slaves`).
+- Hot-reload mode is currently single-process only (`--admin-socket` is not supported with `--slaves`), because each slave process has its own memory and secret store would desync.
 - Existing active client connections are not dropped when secrets are added/removed.
 - Secret state is persisted atomically and restored on next start.
 - Admin API is available over Unix socket in HTTP/JSON format (plus legacy line protocol).
+
+## One-command install (Ubuntu 24.04)
+Interactive installer (asks port/secret/token and removes old stack first):
+```bash
+curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/install.sh | sudo bash
+```
+
+Uninstall:
+```bash
+curl -fsSL https://raw.githubusercontent.com/billionero1/mtprotor/main/uninstall.sh | sudo bash
+```
+
+Optional uninstall flags:
+- `--purge-data` removes `/etc/mtproxy-fork`, `/var/lib/mtproxy-fork`, `/etc/default/mtproxy-fork`.
+- `--purge-source` removes `/opt/mtproxy-fork-src`.
+
+After install:
+- service name: `mtproxy-fork.service`
+- binary: `/usr/local/bin/mtproto-proxy-fork`
+- local CLI: `/usr/local/bin/proxyctl`
 
 ## Building
 Install dependencies, you would need common set of tools for building from source, and development packages for `openssl` and `zlib`.
@@ -83,6 +103,8 @@ Example:
   proxy-multi.conf
 ```
 
+If you use the installer, runtime values are in `/etc/default/mtproxy-fork` and the service file template is `systemd/mtproxy-fork.service`.
+
 HTTP/JSON endpoints over Unix socket:
 - `GET /v1/status`
 - `GET /v1/secrets`
@@ -90,6 +112,13 @@ HTTP/JSON endpoints over Unix socket:
 - `DELETE /v1/secrets/{secret_hex}`
 - `PATCH /v1/secrets/{secret_hex}/enable`
 - `PATCH /v1/secrets/{secret_hex}/disable`
+
+Accepted secret formats in API:
+- plain hex: `<32 hex>`
+- random-padding form: `dd<32 hex>`
+- TLS-like form: `ee<32 hex>[optional hex suffix]`
+
+The runtime stores canonical 16-byte secret internally; `dd`/`ee` are accepted on input for link compatibility.
 
 `POST /v1/secrets` body example:
 ```json
@@ -143,6 +172,15 @@ for cmd in [
   print(s.recv(65535).decode(), end="")
   s.close()
 PY
+```
+
+CLI helper (installed as `proxyctl`):
+```bash
+proxyctl status
+proxyctl secret list
+proxyctl secret add 11111111111111111111111111111111 --label user42
+proxyctl secret disable 11111111111111111111111111111111
+proxyctl secret remove 11111111111111111111111111111111
 ```
 
 5. Generate the link with following schema: `tg://proxy?server=SERVER_NAME&port=PORT&secret=SECRET` (or let the official bot generate it for you).

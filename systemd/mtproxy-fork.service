@@ -1,0 +1,21 @@
+[Unit]
+Description=MTProxy Fork (hot secret reload)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtproxy
+Group=mtproxy
+WorkingDirectory=/var/lib/mtproxy-fork
+EnvironmentFile=-/etc/default/mtproxy-fork
+ExecStart=/usr/local/bin/mtproto-proxy-fork -p ${STATS_PORT} -H ${CLIENT_PORT} -S ${BOOTSTRAP_SECRET} --aes-pwd /etc/mtproxy-fork/proxy-secret --admin-socket ${ADMIN_SOCKET} --secrets-state ${STATE_FILE} --admin-token ${ADMIN_TOKEN} /etc/mtproxy-fork/proxy-multi.conf
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=262144
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

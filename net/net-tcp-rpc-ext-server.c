@@ -193,11 +193,8 @@ static void ext_secret16_to_hex (const unsigned char secret[16], char hex[33]) {
   hex[32] = 0;
 }
 
-static int ext_secret16_from_hex (const char *hex, unsigned char out[16]) {
+static int ext_hex16_to_secret (const char *hex, unsigned char out[16]) {
   int i;
-  if (!hex || strlen (hex) != 32) {
-    return -1;
-  }
   for (i = 0; i < 32; i++) {
     if (!isxdigit ((unsigned char) hex[i])) {
       return -1;
@@ -211,6 +208,41 @@ static int ext_secret16_from_hex (const char *hex, unsigned char out[16]) {
     out[i] = (unsigned char) ((hi << 4) | lo);
   }
   return 0;
+}
+
+static int ext_secret16_from_hex (const char *hex, unsigned char out[16]) {
+  size_t n, i;
+  if (!hex) {
+    return -1;
+  }
+  n = strlen (hex);
+
+  if (n == 32) {
+    return ext_hex16_to_secret (hex, out);
+  }
+
+  // dd + 16-byte secret: random-padding mode link secret.
+  if (n == 34 && !strncasecmp (hex, "dd", 2)) {
+    return ext_hex16_to_secret (hex + 2, out);
+  }
+
+  // ee + 16-byte secret (+ optional hex suffix): TLS-like mode link secret.
+  if (n >= 34 && !strncasecmp (hex, "ee", 2)) {
+    if (ext_hex16_to_secret (hex + 2, out) < 0) {
+      return -1;
+    }
+    if (((n - 34) & 1) != 0) {
+      return -1;
+    }
+    for (i = 34; i < n; i++) {
+      if (!isxdigit ((unsigned char) hex[i])) {
+        return -1;
+      }
+    }
+    return 0;
+  }
+
+  return -1;
 }
 
 static void ext_sanitize_label (const char *in, char out[EXT_SECRET_LABEL_MAX]) {
@@ -914,7 +946,7 @@ static void ext_admin_handle_line (int fd, char *line) {
     int enabled = ext_parse_bool (enabled_s, 1);
     int rc = ext_cmd_add (secret, label ? label : "", expires, enabled);
     if (rc == -2) {
-      ext_admin_send_err (fd, "invalid secret hex");
+      ext_admin_send_err (fd, "invalid secret format");
     } else if (rc < 0) {
       ext_admin_send_err (fd, "add failed");
     } else {
@@ -930,7 +962,7 @@ static void ext_admin_handle_line (int fd, char *line) {
     }
     int rc = ext_cmd_remove (secret);
     if (rc == -2) {
-      ext_admin_send_err (fd, "invalid secret hex");
+      ext_admin_send_err (fd, "invalid secret format");
     } else if (rc == -3) {
       ext_admin_send_err (fd, "secret not found");
     } else if (rc < 0) {
@@ -949,7 +981,7 @@ static void ext_admin_handle_line (int fd, char *line) {
     int enable = !strcasecmp (cmd, "ENABLE");
     int rc = ext_cmd_set_enabled (secret, enable);
     if (rc == -2) {
-      ext_admin_send_err (fd, "invalid secret hex");
+      ext_admin_send_err (fd, "invalid secret format");
     } else if (rc == -3) {
       ext_admin_send_err (fd, "secret not found");
     } else if (rc < 0) {
@@ -1087,7 +1119,7 @@ static void ext_admin_handle_http (int fd, char *req) {
     }
     int rc = ext_cmd_add (secret, label, found_expires ? expires : 0, enabled);
     if (rc == -2) {
-      ext_http_send_error (fd, 400, "invalid secret hex");
+      ext_http_send_error (fd, 400, "invalid secret format");
     } else if (rc < 0) {
       ext_http_send_error (fd, 409, "add failed");
     } else {
@@ -1104,7 +1136,7 @@ static void ext_admin_handle_http (int fd, char *req) {
     }
     int rc = ext_cmd_remove (secret);
     if (rc == -2) {
-      ext_http_send_error (fd, 400, "invalid secret hex");
+      ext_http_send_error (fd, 400, "invalid secret format");
     } else if (rc == -3) {
       ext_http_send_error (fd, 404, "secret not found");
     } else if (rc < 0) {
@@ -1137,7 +1169,7 @@ static void ext_admin_handle_http (int fd, char *req) {
     }
     int rc = ext_cmd_set_enabled (secret, enable);
     if (rc == -2) {
-      ext_http_send_error (fd, 400, "invalid secret hex");
+      ext_http_send_error (fd, 400, "invalid secret format");
     } else if (rc == -3) {
       ext_http_send_error (fd, 404, "secret not found");
     } else if (rc < 0) {

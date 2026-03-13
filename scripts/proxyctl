@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${MTPROXY_ENV_FILE:-/etc/default/mtproxy-fork}"
+if [[ -r "$ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+fi
+
+SOCK="${MTPROXY_SOCKET:-${ADMIN_SOCKET:-/var/lib/mtproxy-fork/admin.sock}}"
+TOKEN="${MTPROXY_TOKEN:-${ADMIN_TOKEN:-}}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  proxyctl status
+  proxyctl secret list
+  proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
+  proxyctl secret remove <secret>
+  proxyctl secret enable <secret>
+  proxyctl secret disable <secret>
+
+Env overrides:
+  MTPROXY_SOCKET=/path/to/admin.sock
+  MTPROXY_TOKEN=<admin token>
+USAGE
+}
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+request() {
+  local method="$1"
+  local path="$2"
+  local data="${3:-}"
+  local -a cmd
+  cmd=(curl --silent --show-error --unix-socket "$SOCK" -X "$method")
+  if [[ -n "$TOKEN" ]]; then
+    cmd+=(-H "X-Admin-Token: $TOKEN")
+  fi
+  if [[ -n "$data" ]]; then
+    cmd+=(-H "Content-Type: application/json" --data "$data")
+  fi
+  cmd+=("http://localhost$path")
+  "${cmd[@]}"
+  echo
+}
+
+[[ -S "$SOCK" ]] || {
+  echo "Admin socket not found: $SOCK" >&2
+  exit 1
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  status)
+    request GET /v1/status
+    ;;
+  secret)
+    sub="${2:-}"
+    case "$sub" in
+      list)
+        request GET /v1/secrets
+        ;;
+      add)
+        secret="${3:-}"
+        [[ -n "$secret" ]] || { usage; exit 1; }
+        shift 3
+        label=""
+        expires="0"
+        enabled="true"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --label)
+              label="${2:-}"
+              shift 2
+              ;;
+            --expires)
+              expires="${2:-}"
+              [[ "$expires" =~ ^[0-9]+$ ]] || { echo "expires must be unix timestamp" >&2; exit 1; }
+              shift 2
+              ;;
+            --disabled)
+              enabled="false"
+              shift
+              ;;
+            --enabled)
+              enabled="true"
+              shift
+              ;;
+            *)
+              usage
+              exit 1
+              ;;
+          esac
+        done
+        payload="{\"secret\":\"$(json_escape "$secret")\",\"label\":\"$(json_escape "$label")\",\"expires\":$expires,\"enabled\":$enabled}"
+        request POST /v1/secrets "$payload"
+        ;;
+      remove)
+        secret="${3:-}"
+        [[ -n "$secret" ]] || { usage; exit 1; }
+        request DELETE "/v1/secrets/$secret"
+        ;;
+      enable)
+        secret="${3:-}"
+        [[ -n "$secret" ]] || { usage; exit 1; }
+        request PATCH "/v1/secrets/$secret/enable"
+        ;;
+      disable)
+        secret="${3:-}"
+        [[ -n "$secret" ]] || { usage; exit 1; }
+        request PATCH "/v1/secrets/$secret/disable"
+        ;;
+      *)
+        usage
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

@@ -2260,7 +2260,7 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("window-clamp", required_argument, 0, 'W', "sets window clamp for client TCP connections");
   parse_option ("http-ports", required_argument, 0, 'H', "comma-separated list of client (HTTP) ports to listen");
   // parse_option ("outbound-connections-ps", required_argument, 0, 'o', "limits creation rate of outbound connections to mtproto-servers (default %d)", DEFAULT_OUTBOUND_CONNECTION_CREATION_RATE);
-  parse_option ("slaves", required_argument, 0, 'M', "spawn several slave workers; not recommended for TLS-transport mode for better replay protection");
+  parse_option ("slaves", required_argument, 0, 'M', "spawn several slave workers; incompatible with --admin-socket hot-reload mode");
   parse_option ("ping-interval", required_argument, 0, 'T', "sets ping interval in second for local TCP connections (default %.3lf)", PING_INTERVAL);
 }
 
@@ -2287,7 +2287,7 @@ void mtfront_pre_init (void) {
   vkprintf (1, "config loaded!\n");
 
   if (hot_admin_socket && workers) {
-    kprintf ("--admin-socket is not supported together with --slaves\n");
+    kprintf ("--admin-socket cannot be used with --slaves: each worker has its own in-memory secret store\n");
     exit (2);
   }
 
