@@ -53,7 +53,10 @@ Hot updates are done through local Unix-socket API (CLI uses that API).
 ## Current Secret Format Support
 
 - 16-byte hex secret (`32` hex chars)
-- `dd`/`ee` prefixed formats (first 16 bytes after prefix are used for match key)
+- `dd` + 16-byte hex
+- `ee` + 16-byte hex (+ optional suffix, e.g. TLS-like client secret form)
+
+For worker backend and runtime matching, the effective key is the canonical 16-byte secret.
 
 ## Build
 
@@ -87,10 +90,23 @@ cp examples/config.dev.json /tmp/mtprotor-config.json
 curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/scripts/install.sh | sudo bash -s -- --repo <org>/<repo>
 ```
 
+Installer behavior:
+
+- in interactive TTY mode, installer asks for:
+  - public listen port
+  - worker local port range
+  - whether to install official `mtproto-proxy`
+- in non-interactive mode, defaults are used unless explicit flags are passed
+
 Optional flags:
 
 - `--ref <branch-or-tag>`
 - `--skip-official` (skip installing official `mtproto-proxy` worker)
+- `--non-interactive`
+- `--listen-port <port>`
+- `--worker-port-start <port>`
+- `--worker-port-end <port>`
+- `--force-config`
 
 Installer performs:
 
@@ -216,6 +232,7 @@ Included tests:
 - unit tests for secret normalization and handshake matching
 - unit tests for state persistence
 - integration tests for:
+  - hot add with multiple secrets (existing connection survives)
   - hot remove behavior (active connection survives)
   - restart + state restore
 
