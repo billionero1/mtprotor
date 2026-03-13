@@ -1,0 +1,28 @@
+[Unit]
+Description=mtprotor (hot-reload runtime for Telegram MTProxy secrets)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtprotor
+Group=mtprotor
+EnvironmentFile=-/etc/default/mtprotor
+ExecStart=/usr/local/bin/mtprotor daemon --config /etc/mtprotor/config.json
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+LimitNOFILE=262144
+RuntimeDirectory=mtprotor
+RuntimeDirectoryMode=0750
+StateDirectory=mtprotor
+StateDirectoryMode=0750
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mtprotor /run/mtprotor /etc/mtprotor
+
+[Install]
+WantedBy=multi-user.target

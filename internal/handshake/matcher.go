@@ -1,0 +1,145 @@
+package handshake
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/example/mtprotor/internal/model"
+)
+
+const HandshakeSize = 64
+
+var AllowedProtocolTags = map[uint32]struct{}{
+	0xdddddddd: {}, // intermediate
+	0xeeeeeeee: {}, // secure
+	0xefefefef: {}, // abridged
+}
+
+func NormalizeSecret(raw string) (string, []byte, error) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	s = strings.TrimPrefix(s, "0x")
+	if len(s)%2 != 0 {
+		return "", nil, errors.New("secret hex length must be even")
+	}
+
+	decoded, err := hex.DecodeString(s)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode secret: %w", err)
+	}
+
+	switch {
+	case len(decoded) == 16:
+		return s, decoded, nil
+	case len(decoded) >= 17 && (decoded[0] == 0xdd || decoded[0] == 0xee):
+		return s, decoded[1:17], nil
+	default:
+		return "", nil, errors.New("unsupported secret format: expected 16-byte hex or dd/ee-prefixed format")
+	}
+}
+
+func MatchSecret(records []model.SecretRecord, first64 []byte, now time.Time) (model.SecretRecord, bool) {
+	for _, rec := range records {
+		if !rec.Enabled || rec.IsExpired(now) {
+			continue
+		}
+		ok, err := Matches(rec.Secret, first64)
+		if err != nil {
+			continue
+		}
+		if ok {
+			return rec, true
+		}
+	}
+	return model.SecretRecord{}, false
+}
+
+func Matches(rawSecret string, first64 []byte) (bool, error) {
+	if len(first64) < HandshakeSize {
+		return false, errors.New("first64 has insufficient size")
+	}
+
+	_, secretKey, err := NormalizeSecret(rawSecret)
+	if err != nil {
+		return false, err
+	}
+
+	keyMaterial := first64[8:40]
+	iv := first64[40:56]
+	keyHash := sha256.Sum256(append(append([]byte{}, keyMaterial...), secretKey...))
+
+	block, err := aes.NewCipher(keyHash[:])
+	if err != nil {
+		return false, fmt.Errorf("create aes cipher: %w", err)
+	}
+
+	tail := make([]byte, 8)
+	copy(tail, first64[56:64])
+	stream := cipher.NewCTR(block, iv)
+	stream.XORKeyStream(tail, tail)
+
+	tag := binary.LittleEndian.Uint32(tail[0:4])
+	if _, ok := AllowedProtocolTags[tag]; !ok {
+		return false, nil
+	}
+	dcID := int16(binary.LittleEndian.Uint16(tail[4:6]))
+	if dcID == 0 || dcID > 1000 || dcID < -1000 {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func BuildClientPreamble(rawSecret string, tag uint32, dcID int16) ([]byte, error) {
+	normalized, secretKey, err := NormalizeSecret(rawSecret)
+	if err != nil {
+		return nil, err
+	}
+	_ = normalized
+
+	buf := make([]byte, HandshakeSize)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("random preamble: %w", err)
+	}
+
+	if buf[0] == 0xef {
+		buf[0] = 0x7f
+	}
+	for i := 0; i < 4; i++ {
+		if buf[i] == 0 {
+			buf[i] = byte(i + 1)
+		}
+	}
+	if binary.LittleEndian.Uint32(buf[4:8]) == 0 {
+		buf[4] = 1
+	}
+
+	plainTail := make([]byte, 8)
+	binary.LittleEndian.PutUint32(plainTail[0:4], tag)
+	binary.LittleEndian.PutUint16(plainTail[4:6], uint16(dcID))
+	if _, err := rand.Read(plainTail[6:8]); err != nil {
+		return nil, fmt.Errorf("random tail suffix: %w", err)
+	}
+
+	keyMaterial := buf[8:40]
+	iv := buf[40:56]
+	keyHash := sha256.Sum256(append(append([]byte{}, keyMaterial...), secretKey...))
+
+	block, err := aes.NewCipher(keyHash[:])
+	if err != nil {
+		return nil, fmt.Errorf("create aes cipher: %w", err)
+	}
+	encTail := make([]byte, len(plainTail))
+	copy(encTail, plainTail)
+	stream := cipher.NewCTR(block, iv)
+	stream.XORKeyStream(encTail, encTail)
+	copy(buf[56:64], encTail)
+	return buf, nil
+}
