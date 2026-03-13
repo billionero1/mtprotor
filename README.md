@@ -66,6 +66,9 @@ Optional flags:
 
 ### Service
 ```bash
+proxyctl runtime status
+proxyctl runtime restart
+proxyctl runtime logs
 proxyctl service status
 proxyctl service status --full
 proxyctl service status --json
@@ -75,6 +78,7 @@ proxyctl health
 ```
 
 `proxyctl service status` is compact by default (active status, PID, memory, CPU, listener, secret counters).
+`proxyctl runtime ...` is a branding alias for the same operations.
 
 ### Links
 ```bash
@@ -110,6 +114,8 @@ Additionally, expire-sync timer runs every minute and marks expired secrets as d
 mtproxymenu
 # or
 proxyctl menu
+# or
+proxyctl console
 ```
 
 Menu includes:

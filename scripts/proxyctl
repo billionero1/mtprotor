@@ -3,6 +3,8 @@ set -euo pipefail
 
 ENV_FILE="${MTPROXY_ENV_FILE:-/etc/default/mtproxy-fork}"
 SERVICE_NAME="${MTPROXY_SERVICE:-mtproxy-fork}"
+BRAND_NAME="${MTPROXY_BRAND_NAME:-Bulldog Proxy}"
+BRAND_CONSOLE="${MTPROXY_BRAND_CONSOLE:-Bulldog Control Console}"
 
 load_env() {
   if [[ -r "$ENV_FILE" ]]; then
@@ -76,6 +78,8 @@ Usage:
   proxyctl health
   proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd]
 
+  proxyctl runtime status [--full|--json]
+  proxyctl runtime start|stop|restart|logs
   proxyctl service status [--full|--json]
   proxyctl service start|stop|restart|logs
   proxyctl config show
@@ -106,6 +110,7 @@ Usage:
   proxyctl bot ssh allow-from --user <name> [--allow-from <ip_or_cidr>|--allow-any]
 
   proxyctl menu
+  proxyctl console
 
 Env overrides:
   MTPROXY_ENV_FILE=/etc/default/mtproxy-fork
@@ -379,7 +384,8 @@ print_service_summary() {
   local snap active substate pid start_ts mem cpu listen host total active_secrets
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
-  echo "Service      : $(paint "$C_BOLD" "$SERVICE_NAME") ($(paint_state "$active" "$substate"))"
+  echo "Runtime      : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
+  echo "Unit         : $SERVICE_NAME"
   echo "Main PID     : $(paint "$C_CYAN" "$pid")"
   echo "Started      : $start_ts"
   echo "Memory       : $(fmt_bytes "$mem")"
@@ -393,8 +399,8 @@ print_service_summary_json() {
   local snap active substate pid start_ts mem cpu listen host total active_secrets
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
-  printf '{\"service\":\"%s\",\"active\":\"%s\",\"substate\":\"%s\",\"pid\":%s,\"started\":\"%s\",\"memory_bytes\":%s,\"cpu_nsec\":%s,\"client_port\":%s,\"listening\":\"%s\",\"public_host\":\"%s\",\"secrets_total\":%s,\"secrets_active\":%s}\n' \
-    "$SERVICE_NAME" "$active" "$substate" "$pid" "$(json_escape "$start_ts")" "$mem" "$cpu" "$CLIENT_PORT" "$listen" "$(json_escape "$host")" "$total" "$active_secrets"
+  printf '{\"brand\":\"%s\",\"service\":\"%s\",\"active\":\"%s\",\"substate\":\"%s\",\"pid\":%s,\"started\":\"%s\",\"memory_bytes\":%s,\"cpu_nsec\":%s,\"client_port\":%s,\"listening\":\"%s\",\"public_host\":\"%s\",\"secrets_total\":%s,\"secrets_active\":%s}\n' \
+    "$(json_escape "$BRAND_NAME")" "$SERVICE_NAME" "$active" "$substate" "$pid" "$(json_escape "$start_ts")" "$mem" "$cpu" "$CLIENT_PORT" "$listen" "$(json_escape "$host")" "$total" "$active_secrets"
 }
 
 cmd_status() {
@@ -816,11 +822,12 @@ menu_header() {
   snap="$(collect_service_snapshot)"
   IFS='|' read -r active substate pid start_ts mem cpu listen host total active_secrets <<<"$snap"
   echo
-  echo "============== $(paint "$C_BOLD" "Bulldog MTProxy Menu") =============="
-  echo "Service   : $(paint "$C_BOLD" "$SERVICE_NAME") ($(paint_state "$active" "$substate"))  PID: $(paint "$C_CYAN" "$pid")"
-  echo "Client    : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
-  echo "Secrets   : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
-  echo "Started   : $start_ts"
+  echo "=========== $(paint "$C_BOLD" "$BRAND_CONSOLE") ==========="
+  echo "Runtime   : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
+  echo "Unit      : $SERVICE_NAME  PID: $(paint "$C_CYAN" "$pid")"
+  echo "Endpoint  : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
+  echo "Users     : total=$(paint "$C_CYAN" "$total") active=$(paint "$C_CYAN" "$active_secrets")"
+  echo "Started   : $start_ts (UTC)"
   echo "=================================================="
 }
 
@@ -831,7 +838,7 @@ menu_bot_settings() {
     IFS='|' read -r host user pass allow <<<"$cred"
     user="${user:-mtproxybot}"
     echo
-    echo "-------- $(paint "$C_BOLD" "Bot SSH Settings") --------"
+    echo "-------- $(paint "$C_BOLD" "Bulldog Bot SSH Settings") --------"
     run_safe cmd_bot_ssh show
     if [[ -z "$pass" ]]; then
       echo "$(paint "$C_YELLOW" "[NOTE]") saved password is empty/unknown; rotate to issue a new one."
@@ -913,22 +920,29 @@ menu_bot_settings() {
 menu_cmd() {
   while true; do
     menu_header
-    echo "1) Quick service summary"
-    echo "2) Health check (JSON)"
-    echo "3) Show default links"
-    echo "4) List users (table)"
-    echo "5) Issue new user (secret + link)"
-    echo "6) Disable user"
-    echo "7) Enable user"
-    echo "8) Remove user"
+    echo "[Runtime]"
+    echo "1) Runtime overview"
+    echo "2) Health probe (JSON)"
+    echo "12) Restart runtime"
+    echo "14) Full systemd runtime status"
+    echo "13) Runtime logs (last 120)"
+    echo
+    echo "[Client Access]"
+    echo "3) Show default client links"
     echo "9) Change client port (restart)"
-    echo "10) Change bootstrap secret"
+    echo "10) Rotate bootstrap secret"
     echo "11) Change public host"
-    echo "12) Restart service"
-    echo "13) Show service logs (last 120)"
-    echo "14) Full systemd status"
-    echo "15) Bot SSH settings (login/password/IP)"
-    echo "16) Disable expired users now"
+    echo
+    echo "[Users / Subscriptions]"
+    echo "4) List users (table)"
+    echo "5) Issue user access (secret + link)"
+    echo "6) Suspend user access"
+    echo "7) Resume user access"
+    echo "8) Revoke user access"
+    echo "16) Sync expired users -> disabled"
+    echo
+    echo "[Bot Integration]"
+    echo "15) Bot SSH settings (login/password/allow-from)"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
@@ -950,7 +964,7 @@ menu_cmd() {
         printf "Label: "
         IFS= read -r label || true
         [[ -n "$label" ]] || { warn "label is required"; continue; }
-        printf "Days (empty for no expiry): "
+        printf "Days active (empty for no expiry): "
         IFS= read -r days || true
         if [[ -n "$days" ]]; then
           run_safe cmd_secret issue "$label" --days "$days"
@@ -959,17 +973,17 @@ menu_cmd() {
         fi
         ;;
       6)
-        printf "Secret to disable: "
+        printf "Secret to suspend: "
         IFS= read -r secd || true
         [[ -n "$secd" ]] && run_safe cmd_secret disable "$secd"
         ;;
       7)
-        printf "Secret to enable: "
+        printf "Secret to resume: "
         IFS= read -r sece || true
         [[ -n "$sece" ]] && run_safe cmd_secret enable "$sece"
         ;;
       8)
-        printf "Secret to remove: "
+        printf "Secret to revoke/remove: "
         IFS= read -r secr || true
         [[ -n "$secr" ]] && run_safe cmd_secret remove "$secr"
         ;;
@@ -1029,9 +1043,9 @@ case "$cmd" in
     shift
     cmd_link "$@"
     ;;
-  service)
+  service|runtime)
     sub="${2:-}"
-    [[ -n "$sub" ]] || die "Usage: proxyctl service status [--full|--json] | start|stop|restart|logs"
+    [[ -n "$sub" ]] || die "Usage: proxyctl runtime status [--full|--json] | start|stop|restart|logs"
     opt="${3:-}"
     service_cmd "$sub" "$opt"
     ;;
@@ -1058,7 +1072,7 @@ case "$cmd" in
     shift
     cmd_bot "$@"
     ;;
-  menu)
+  menu|console)
     menu_cmd
     ;;
   *)
