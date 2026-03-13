@@ -69,7 +69,10 @@ else
 fi
 
 echo "Building mtprotor from $SRC_DIR"
-GOCACHE="$TMP_ROOT/gocache" go build -o "$TMP_ROOT/mtprotor" "$SRC_DIR/cmd/mtprotor"
+(
+  cd "$SRC_DIR"
+  GOCACHE="$TMP_ROOT/gocache" go build -o "$TMP_ROOT/mtprotor" ./cmd/mtprotor
+)
 
 install -d -m 0755 /usr/local/bin
 install -m 0755 "$TMP_ROOT/mtprotor" /usr/local/bin/mtprotor
