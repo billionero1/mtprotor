@@ -37,11 +37,12 @@ func NormalizeSecret(raw string) (string, []byte, error) {
 
 	switch {
 	case len(decoded) == 16:
-		return s, decoded, nil
+		return hex.EncodeToString(decoded), decoded, nil
 	case len(decoded) >= 17 && (decoded[0] == 0xdd || decoded[0] == 0xee):
-		return s, decoded[1:17], nil
+		plain := decoded[1:17]
+		return hex.EncodeToString(plain), plain, nil
 	default:
-		return "", nil, errors.New("unsupported secret format: expected 16-byte hex or dd/ee-prefixed format")
+		return "", nil, errors.New("unsupported secret format: expected 16-byte hex, dd+16-byte, or ee+16-byte(+optional suffix)")
 	}
 }
 
@@ -80,16 +81,16 @@ func Matches(rawSecret string, first64 []byte) (bool, error) {
 		return false, fmt.Errorf("create aes cipher: %w", err)
 	}
 
-	tail := make([]byte, 8)
-	copy(tail, first64[56:64])
+	decrypted := make([]byte, HandshakeSize)
+	copy(decrypted, first64[:HandshakeSize])
 	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(tail, tail)
+	stream.XORKeyStream(decrypted, decrypted)
 
-	tag := binary.LittleEndian.Uint32(tail[0:4])
+	tag := binary.LittleEndian.Uint32(decrypted[56:60])
 	if _, ok := AllowedProtocolTags[tag]; !ok {
 		return false, nil
 	}
-	dcID := int16(binary.LittleEndian.Uint16(tail[4:6]))
+	dcID := int16(binary.LittleEndian.Uint16(decrypted[60:62]))
 	if dcID == 0 || dcID > 1000 || dcID < -1000 {
 		return false, nil
 	}
@@ -98,11 +99,10 @@ func Matches(rawSecret string, first64 []byte) (bool, error) {
 }
 
 func BuildClientPreamble(rawSecret string, tag uint32, dcID int16) ([]byte, error) {
-	normalized, secretKey, err := NormalizeSecret(rawSecret)
+	_, secretKey, err := NormalizeSecret(rawSecret)
 	if err != nil {
 		return nil, err
 	}
-	_ = normalized
 
 	buf := make([]byte, HandshakeSize)
 	if _, err := rand.Read(buf); err != nil {
@@ -127,6 +127,7 @@ func BuildClientPreamble(rawSecret string, tag uint32, dcID int16) ([]byte, erro
 	if _, err := rand.Read(plainTail[6:8]); err != nil {
 		return nil, fmt.Errorf("random tail suffix: %w", err)
 	}
+	copy(buf[56:64], plainTail)
 
 	keyMaterial := buf[8:40]
 	iv := buf[40:56]
@@ -136,10 +137,10 @@ func BuildClientPreamble(rawSecret string, tag uint32, dcID int16) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("create aes cipher: %w", err)
 	}
-	encTail := make([]byte, len(plainTail))
-	copy(encTail, plainTail)
+	// MTProxy alignment: consume first 56 bytes of CTR stream before payload tail.
 	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(encTail, encTail)
-	copy(buf[56:64], encTail)
+	drop := make([]byte, 56)
+	stream.XORKeyStream(drop, drop)
+	stream.XORKeyStream(buf[56:64], buf[56:64])
 	return buf, nil
 }

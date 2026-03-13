@@ -6,22 +6,27 @@ func TestNormalizeSecret(t *testing.T) {
 	tests := []struct {
 		name    string
 		secret  string
+		want    string
 		wantErr bool
 	}{
-		{name: "plain16", secret: "00112233445566778899aabbccddeeff"},
-		{name: "with0x", secret: "0x00112233445566778899aabbccddeeff"},
-		{name: "dd-prefixed", secret: "dd00112233445566778899aabbccddeeff"},
+		{name: "plain16", secret: "00112233445566778899aabbccddeeff", want: "00112233445566778899aabbccddeeff"},
+		{name: "with0x", secret: "0x00112233445566778899aabbccddeeff", want: "00112233445566778899aabbccddeeff"},
+		{name: "dd-prefixed", secret: "dd00112233445566778899aabbccddeeff", want: "00112233445566778899aabbccddeeff"},
+		{name: "ee-with-suffix", secret: "ee00112233445566778899aabbccddeeff6578616d706c652e636f6d", want: "00112233445566778899aabbccddeeff"},
 		{name: "invalid", secret: "xyz", wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := NormalizeSecret(tt.secret)
+			got, _, err := NormalizeSecret(tt.secret)
 			if tt.wantErr && err == nil {
 				t.Fatalf("expected error")
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("unexpected normalized secret: got=%s want=%s", got, tt.want)
 			}
 		})
 	}

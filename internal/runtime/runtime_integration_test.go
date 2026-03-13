@@ -84,6 +84,77 @@ func TestHotRemoveKeepsActiveConnection(t *testing.T) {
 	}
 }
 
+func TestMultiSecretHotAddDoesNotDropExistingConnection(t *testing.T) {
+	t.Parallel()
+	upstream := startMockUpstream(t)
+
+	cfg := config.Config{
+		ListenAddr:             "127.0.0.1:0",
+		AdminSocket:            filepath.Join(t.TempDir(), "admin.sock"),
+		StateFile:              filepath.Join(t.TempDir(), "state.json"),
+		LogLevel:               "error",
+		HandshakeTimeoutMillis: 2000,
+		DialTimeoutMillis:      2000,
+		DropOnDisable:          false,
+		Worker: config.WorkerConfig{
+			Mode:                   "builtin",
+			PortRangeStart:         31400,
+			PortRangeEnd:           31500,
+			StartTimeoutMillis:     1000,
+			StopGracePeriodSeconds: 1,
+			BuiltinUpstreamAddr:    upstream,
+		},
+	}
+
+	rt := New(cfg, testLogger())
+	if err := rt.Start(); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+			t.Skipf("skipping integration test in restricted sandbox: %v", err)
+		}
+		t.Fatalf("start runtime: %v", err)
+	}
+	defer func() {
+		_ = rt.Shutdown(context.Background())
+	}()
+
+	first, err := rt.AddSecret(AddSecretInput{
+		Secret:  "11111111111111111111111111111111",
+		Label:   "first",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("add first secret: %v", err)
+	}
+	_ = first
+
+	conn1 := mustDialClient(t, rt.ProxyAddr())
+	defer conn1.Close()
+	if err := sendHandshake(conn1, "11111111111111111111111111111111"); err != nil {
+		t.Fatalf("send first handshake: %v", err)
+	}
+	assertEcho(t, conn1, []byte("keepalive-1"))
+
+	second, err := rt.AddSecret(AddSecretInput{
+		Secret:  "22222222222222222222222222222222",
+		Label:   "second",
+		Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("add second secret: %v", err)
+	}
+	_ = second
+
+	// Existing stream must survive runtime secret update.
+	assertEcho(t, conn1, []byte("keepalive-2"))
+
+	conn2 := mustDialClient(t, rt.ProxyAddr())
+	defer conn2.Close()
+	if err := sendHandshake(conn2, "22222222222222222222222222222222"); err != nil {
+		t.Fatalf("send second handshake: %v", err)
+	}
+	assertEcho(t, conn2, []byte("new-secret-ok"))
+}
+
 func TestStateRestoreAfterRestart(t *testing.T) {
 	t.Parallel()
 	upstream := startMockUpstream(t)
