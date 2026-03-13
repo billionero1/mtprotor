@@ -186,7 +186,7 @@ func TestStateRestoreAfterRestart(t *testing.T) {
 		t.Fatalf("start first runtime: %v", err)
 	}
 	if _, err := r1.AddSecret(AddSecretInput{
-		Secret:  "11223344556677889900aabbccddeeff",
+		Secret:  "ee11223344556677889900aabbccddeeff6578616d706c652e636f6d",
 		Enabled: true,
 	}); err != nil {
 		t.Fatalf("add secret: %v", err)
@@ -203,8 +203,12 @@ func TestStateRestoreAfterRestart(t *testing.T) {
 		_ = r2.Shutdown(context.Background())
 	}()
 
-	if got := len(r2.ListSecrets()); got != 1 {
+	secrets := r2.ListSecrets()
+	if got := len(secrets); got != 1 {
 		t.Fatalf("expected restored secret count=1, got=%d", got)
+	}
+	if secrets[0].TLSDomain != "example.com" {
+		t.Fatalf("expected tls_domain=example.com, got=%q", secrets[0].TLSDomain)
 	}
 
 	conn := mustDialClient(t, r2.ProxyAddr())

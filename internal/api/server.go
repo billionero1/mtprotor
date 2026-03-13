@@ -113,6 +113,7 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var req struct {
 			Secret         string  `json:"secret"`
+			TLSDomain      string  `json:"tls_domain"`
 			Label          string  `json:"label"`
 			Enabled        *bool   `json:"enabled"`
 			ExpiresAt      *string `json:"expires_at"`
@@ -140,6 +141,7 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 
 		item, err := s.controller.AddSecret(runtime.AddSecretInput{
 			Secret:         req.Secret,
+			TLSDomain:      req.TLSDomain,
 			Label:          req.Label,
 			Enabled:        enabled,
 			ExpiresAt:      expiresAt,

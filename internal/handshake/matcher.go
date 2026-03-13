@@ -23,27 +23,63 @@ var AllowedProtocolTags = map[uint32]struct{}{
 	0xefefefef: {}, // abridged
 }
 
-func NormalizeSecret(raw string) (string, []byte, error) {
+type ParsedSecret struct {
+	Normalized string
+	Key        []byte
+	Prefix     string
+	TLSDomain  string
+}
+
+func ParseSecret(raw string) (ParsedSecret, error) {
 	s := strings.TrimSpace(strings.ToLower(raw))
 	s = strings.TrimPrefix(s, "0x")
 	if len(s)%2 != 0 {
-		return "", nil, errors.New("secret hex length must be even")
+		return ParsedSecret{}, errors.New("secret hex length must be even")
 	}
 
 	decoded, err := hex.DecodeString(s)
 	if err != nil {
-		return "", nil, fmt.Errorf("decode secret: %w", err)
+		return ParsedSecret{}, fmt.Errorf("decode secret: %w", err)
 	}
 
 	switch {
 	case len(decoded) == 16:
-		return hex.EncodeToString(decoded), decoded, nil
-	case len(decoded) >= 17 && (decoded[0] == 0xdd || decoded[0] == 0xee):
-		plain := decoded[1:17]
-		return hex.EncodeToString(plain), plain, nil
+		key := append([]byte(nil), decoded...)
+		return ParsedSecret{
+			Normalized: hex.EncodeToString(key),
+			Key:        key,
+			Prefix:     "plain",
+		}, nil
+	case len(decoded) == 17 && decoded[0] == 0xdd:
+		key := append([]byte(nil), decoded[1:17]...)
+		return ParsedSecret{
+			Normalized: hex.EncodeToString(key),
+			Key:        key,
+			Prefix:     "dd",
+		}, nil
+	case len(decoded) >= 17 && decoded[0] == 0xee:
+		key := append([]byte(nil), decoded[1:17]...)
+		domain, err := decodeTLSDomainSuffix(decoded[17:])
+		if err != nil {
+			return ParsedSecret{}, err
+		}
+		return ParsedSecret{
+			Normalized: hex.EncodeToString(key),
+			Key:        key,
+			Prefix:     "ee",
+			TLSDomain:  domain,
+		}, nil
 	default:
-		return "", nil, errors.New("unsupported secret format: expected 16-byte hex, dd+16-byte, or ee+16-byte(+optional suffix)")
+		return ParsedSecret{}, errors.New("unsupported secret format: expected 16-byte hex, dd+16-byte, or ee+16-byte(+optional suffix)")
 	}
+}
+
+func NormalizeSecret(raw string) (string, []byte, error) {
+	parsed, err := ParseSecret(raw)
+	if err != nil {
+		return "", nil, err
+	}
+	return parsed.Normalized, parsed.Key, nil
 }
 
 func MatchSecret(records []model.SecretRecord, first64 []byte, now time.Time) (model.SecretRecord, bool) {
@@ -143,4 +179,50 @@ func BuildClientPreamble(rawSecret string, tag uint32, dcID int16) ([]byte, erro
 	stream.XORKeyStream(drop, drop)
 	stream.XORKeyStream(buf[56:64], buf[56:64])
 	return buf, nil
+}
+
+func decodeTLSDomainSuffix(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", nil
+	}
+	domain, err := NormalizeTLSDomain(string(raw))
+	if err != nil {
+		return "", errors.New("invalid tls domain suffix")
+	}
+	return domain, nil
+}
+
+func NormalizeTLSDomain(domain string) (string, error) {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return "", nil
+	}
+	if len(domain) > 253 {
+		return "", errors.New("tls domain is too long")
+	}
+	if strings.Contains(domain, "..") ||
+		strings.HasPrefix(domain, ".") ||
+		strings.HasSuffix(domain, ".") {
+		return "", errors.New("invalid tls domain")
+	}
+
+	labels := strings.Split(domain, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 {
+			return "", errors.New("invalid tls domain")
+		}
+		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return "", errors.New("invalid tls domain")
+		}
+		for i := 0; i < len(label); i++ {
+			ch := label[i]
+			isLetter := ch >= 'a' && ch <= 'z'
+			isDigit := ch >= '0' && ch <= '9'
+			if !isLetter && !isDigit && ch != '-' {
+				return "", errors.New("invalid tls domain")
+			}
+		}
+	}
+
+	return domain, nil
 }

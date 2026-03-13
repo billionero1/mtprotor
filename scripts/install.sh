@@ -294,6 +294,8 @@ MTPROXY_BIN=/usr/local/bin/mtproto-proxy
 MTPROXY_BASE_ARGS="--aes-pwd /etc/mtprotor/proxy-secret"
 MTPROXY_CONFIG_FILE=/etc/mtprotor/proxy-multi.conf
 MTPROXY_PLAIN_PORT_OFFSET=10000
+# Keep per-secret worker listeners local-only.
+MTPROXY_BIND_ADDR=127.0.0.1
 ENVEOF
   chmod 0640 /etc/default/mtprotor
   chown root:mtprotor /etc/default/mtprotor

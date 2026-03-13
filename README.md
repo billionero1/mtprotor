@@ -33,6 +33,8 @@ Implemented in **Go** for:
 4. Worker handles protocol compatibility with Telegram.
 5. Existing active streams continue even if secret set changes.
 
+Worker listeners are bound to loopback (`127.0.0.1`) by default, so only the main public listener is exposed.
+
 Hot updates are done through local Unix-socket API (CLI uses that API).
 
 ## Repository Structure
@@ -56,7 +58,12 @@ Hot updates are done through local Unix-socket API (CLI uses that API).
 - `dd` + 16-byte hex
 - `ee` + 16-byte hex (+ optional suffix, e.g. TLS-like client secret form)
 
-For worker backend and runtime matching, the effective key is the canonical 16-byte secret.
+Behavior:
+
+- Runtime matching uses the canonical 16-byte key.
+- `dd` form is accepted as real client-compatible secret encoding.
+- `ee...<domain-hex>` form parses the domain suffix and passes it to official worker as `-D <domain>`.
+- You can also set `--tls-domain <domain>` explicitly in CLI/API.
 
 ## Build
 
@@ -133,6 +140,7 @@ sudo journalctl -u mtprotor -f
 mtprotor status
 mtprotor secret list
 mtprotor secret add <secret_hex> --label main
+mtprotor secret add <secret_hex> --tls-domain example.com
 mtprotor secret remove <secret_id>
 mtprotor secret disable <secret_id>
 mtprotor secret enable <secret_id>
@@ -143,6 +151,7 @@ Extra options for add:
 - `--expires-at 2026-12-31T00:00:00Z`
 - `--max-connections 100`
 - `--disabled`
+- `--tls-domain example.com`
 
 ## Local Admin API
 
@@ -168,7 +177,7 @@ Create secret:
 ```bash
 curl --unix-socket /run/mtprotor/admin.sock \
   -H 'Content-Type: application/json' \
-  -d '{"secret":"00112233445566778899aabbccddeeff","label":"main","enabled":true}' \
+  -d '{"secret":"ee00112233445566778899aabbccddeeff6578616d706c652e636f6d","label":"main","enabled":true}' \
   http://localhost/v1/secrets
 ```
 
@@ -192,6 +201,7 @@ Important fields:
 - `{{port}}` - assigned local worker port
 - `{{secret}}` - normalized secret
 - `{{id}}` - secret ID
+- `{{tls_domain}}` - normalized tls domain for `ee` transport (may be empty)
 
 When using official worker wrapper (`/usr/local/bin/mtproto-worker-wrapper.sh`):
 
@@ -199,6 +209,7 @@ When using official worker wrapper (`/usr/local/bin/mtproto-worker-wrapper.sh`):
 - do not include `-p/-H/-S` in `MTPROXY_BASE_ARGS` (wrapper injects them per secret worker)
 - set `MTPROXY_CONFIG_FILE=/etc/mtprotor/proxy-multi.conf` for binaries that expect config as positional argument
 - optional `MTPROXY_PLAIN_PORT_OFFSET` controls derived plain port (`-p`)
+- optional `MTPROXY_BIND_ADDR` controls worker bind address (default `127.0.0.1`)
 - example env file: `examples/mtprotor.env`
 
 ## Uninstall
@@ -248,6 +259,7 @@ Included GitHub Actions workflows:
 - Secret remove/disable blocks new connections immediately.
 - Existing connections are preserved by default (`drop_on_disable=false`).
 - API returns masked secret values (full secret not exposed in list output).
+- Worker scale model: one worker process per active secret (not per client connection).
 
 ## License
 

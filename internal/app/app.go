@@ -157,6 +157,7 @@ func runSecretList(args []string) int {
 func runSecretAdd(args []string) int {
 	fs := flag.NewFlagSet("secret add", flag.ContinueOnError)
 	label := fs.String("label", "", "Secret label")
+	tlsDomain := fs.String("tls-domain", "", "TLS domain (for ee transport mode)")
 	disabled := fs.Bool("disabled", false, "Create secret in disabled state")
 	expiresAt := fs.String("expires-at", "", "RFC3339 UTC expiration")
 	maxConn := fs.Int("max-connections", 0, "Max concurrent connections (0 = unlimited)")
@@ -190,6 +191,7 @@ func runSecretAdd(args []string) int {
 	cli := client.New(sock)
 	item, err := cli.AddSecret(context.Background(), runtime.AddSecretInput{
 		Secret:         fs.Arg(0),
+		TLSDomain:      *tlsDomain,
 		Label:          *label,
 		Enabled:        !*disabled,
 		ExpiresAt:      exp,
@@ -312,7 +314,7 @@ Usage:
   mtprotor health [--config ... | --socket ...]
 
   mtprotor secret list [--config ... | --socket ...]
-  mtprotor secret add <secret_hex> [--label main] [--disabled] [--expires-at RFC3339] [--max-connections N]
+  mtprotor secret add <secret_hex> [--label main] [--tls-domain example.com] [--disabled] [--expires-at RFC3339] [--max-connections N]
   mtprotor secret remove <id>
   mtprotor secret enable <id>
   mtprotor secret disable <id>

@@ -50,6 +50,7 @@ func (c *Client) ListSecrets(ctx context.Context) ([]runtime.SecretView, error) 
 func (c *Client) AddSecret(ctx context.Context, in runtime.AddSecretInput) (runtime.SecretView, error) {
 	body := map[string]any{
 		"secret":          in.Secret,
+		"tls_domain":      in.TLSDomain,
 		"label":           in.Label,
 		"enabled":         in.Enabled,
 		"max_connections": in.MaxConnections,

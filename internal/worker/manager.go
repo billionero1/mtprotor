@@ -20,11 +20,12 @@ import (
 )
 
 type Instance struct {
-	SecretID string
-	Secret   string
-	Port     int
-	Addr     string
-	Started  time.Time
+	SecretID  string
+	Secret    string
+	TLSDomain string
+	Port      int
+	Addr      string
+	Started   time.Time
 
 	mode   string
 	cmd    *exec.Cmd
@@ -50,7 +51,7 @@ func NewManager(cfg config.WorkerConfig, logger *slog.Logger) *Manager {
 	}
 }
 
-func (m *Manager) Start(secretID, secret string) (*Instance, error) {
+func (m *Manager) Start(secretID, secret, tlsDomain string) (*Instance, error) {
 	m.mu.Lock()
 	if inst, ok := m.instances[secretID]; ok {
 		m.mu.Unlock()
@@ -65,13 +66,14 @@ func (m *Manager) Start(secretID, secret string) (*Instance, error) {
 
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 	inst := &Instance{
-		SecretID: secretID,
-		Secret:   secret,
-		Port:     port,
-		Addr:     addr,
-		Started:  time.Now().UTC(),
-		mode:     m.cfg.Mode,
-		done:     make(chan error, 1),
+		SecretID:  secretID,
+		Secret:    secret,
+		TLSDomain: strings.TrimSpace(strings.ToLower(tlsDomain)),
+		Port:      port,
+		Addr:      addr,
+		Started:   time.Now().UTC(),
+		mode:      m.cfg.Mode,
+		done:      make(chan error, 1),
 	}
 
 	switch m.cfg.Mode {
@@ -159,6 +161,7 @@ func (m *Manager) startCommandMode(inst *Instance) error {
 		replaced := strings.ReplaceAll(arg, "{{port}}", strconv.Itoa(inst.Port))
 		replaced = strings.ReplaceAll(replaced, "{{secret}}", inst.Secret)
 		replaced = strings.ReplaceAll(replaced, "{{id}}", inst.SecretID)
+		replaced = strings.ReplaceAll(replaced, "{{tls_domain}}", inst.TLSDomain)
 		args = append(args, replaced)
 	}
 
@@ -167,6 +170,8 @@ func (m *Manager) startCommandMode(inst *Instance) error {
 	for k, v := range m.cfg.Env {
 		env = append(env, k+"="+v)
 	}
+	// Always pass per-secret tls domain explicitly (empty value clears inherited env).
+	env = append(env, "MTPROXY_TLS_DOMAIN="+inst.TLSDomain)
 	cmd.Env = env
 
 	stdout, err := cmd.StdoutPipe()

@@ -22,6 +22,7 @@ import (
 
 type AddSecretInput struct {
 	Secret         string
+	TLSDomain      string
 	Label          string
 	Enabled        bool
 	ExpiresAt      *time.Time
@@ -31,6 +32,7 @@ type AddSecretInput struct {
 type SecretView struct {
 	ID             string     `json:"id"`
 	SecretMasked   string     `json:"secret_masked"`
+	TLSDomain      string     `json:"tls_domain,omitempty"`
 	Label          string     `json:"label,omitempty"`
 	Enabled        bool       `json:"enabled"`
 	CreatedAt      time.Time  `json:"created_at"`
@@ -169,6 +171,7 @@ func (r *Runtime) ListSecrets() []SecretView {
 		items = append(items, SecretView{
 			ID:             rec.ID,
 			SecretMasked:   maskSecret(rec.Secret),
+			TLSDomain:      rec.TLSDomain,
 			Label:          rec.Label,
 			Enabled:        rec.Enabled,
 			CreatedAt:      rec.CreatedAt,
@@ -186,7 +189,7 @@ func (r *Runtime) ListSecrets() []SecretView {
 }
 
 func (r *Runtime) AddSecret(in AddSecretInput) (SecretView, error) {
-	normalized, _, err := handshake.NormalizeSecret(in.Secret)
+	parsed, err := handshake.ParseSecret(in.Secret)
 	if err != nil {
 		return SecretView{}, err
 	}
@@ -195,9 +198,19 @@ func (r *Runtime) AddSecret(in AddSecretInput) (SecretView, error) {
 	}
 
 	now := time.Now().UTC()
-	id := secretID(normalized)
+	id := secretID(parsed.Normalized)
 	if in.ExpiresAt != nil && in.ExpiresAt.Before(now) {
 		return SecretView{}, errors.New("expires_at is in the past")
+	}
+	tlsDomain, err := handshake.NormalizeTLSDomain(in.TLSDomain)
+	if err != nil {
+		return SecretView{}, err
+	}
+	if parsed.TLSDomain != "" {
+		if tlsDomain != "" && tlsDomain != parsed.TLSDomain {
+			return SecretView{}, errors.New("tls_domain does not match ee secret suffix")
+		}
+		tlsDomain = parsed.TLSDomain
 	}
 
 	r.mu.Lock()
@@ -208,7 +221,8 @@ func (r *Runtime) AddSecret(in AddSecretInput) (SecretView, error) {
 
 	rec := model.SecretRecord{
 		ID:             id,
-		Secret:         normalized,
+		Secret:         parsed.Normalized,
+		TLSDomain:      tlsDomain,
 		Label:          in.Label,
 		Enabled:        in.Enabled,
 		CreatedAt:      now,
@@ -225,7 +239,7 @@ func (r *Runtime) AddSecret(in AddSecretInput) (SecretView, error) {
 	}
 
 	if rec.Enabled && !rec.IsExpired(now) {
-		if _, err := r.workers.Start(rec.ID, rec.Secret); err != nil {
+		if _, err := r.workers.Start(rec.ID, rec.Secret, rec.TLSDomain); err != nil {
 			r.mu.Lock()
 			delete(r.secrets, rec.ID)
 			_ = r.persistLocked()
@@ -286,7 +300,7 @@ func (r *Runtime) EnableSecret(id string) (SecretView, error) {
 	if err != nil {
 		return SecretView{}, err
 	}
-	if _, err := r.workers.Start(rec.ID, rec.Secret); err != nil {
+	if _, err := r.workers.Start(rec.ID, rec.Secret, rec.TLSDomain); err != nil {
 		return SecretView{}, err
 	}
 	r.logger.Info("secret enabled", "secret_id", id)
@@ -381,7 +395,7 @@ func (r *Runtime) handleConn(client net.Conn) {
 
 	addr, ok := r.workers.Addr(rec.ID)
 	if !ok {
-		inst, err := r.workers.Start(rec.ID, rec.Secret)
+		inst, err := r.workers.Start(rec.ID, rec.Secret, rec.TLSDomain)
 		if err != nil {
 			r.logger.Error("worker start failed", "secret_id", rec.ID, "err", err)
 			return
@@ -429,7 +443,7 @@ func (r *Runtime) loadState() error {
 	for _, rec := range state.Secrets {
 		r.secrets[rec.ID] = rec
 		if rec.Enabled && !rec.IsExpired(now) {
-			if _, err := r.workers.Start(rec.ID, rec.Secret); err != nil {
+			if _, err := r.workers.Start(rec.ID, rec.Secret, rec.TLSDomain); err != nil {
 				r.logger.Error("worker restore failed", "secret_id", rec.ID, "err", err)
 			}
 		}
@@ -486,6 +500,7 @@ func (r *Runtime) getSecretView(id string) SecretView {
 	return SecretView{
 		ID:             rec.ID,
 		SecretMasked:   maskSecret(rec.Secret),
+		TLSDomain:      rec.TLSDomain,
 		Label:          rec.Label,
 		Enabled:        rec.Enabled,
 		CreatedAt:      rec.CreatedAt,

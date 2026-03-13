@@ -6,6 +6,7 @@ import "time"
 type SecretRecord struct {
 	ID             string     `json:"id"`
 	Secret         string     `json:"secret"`
+	TLSDomain      string     `json:"tls_domain,omitempty"`
 	Label          string     `json:"label,omitempty"`
 	Enabled        bool       `json:"enabled"`
 	CreatedAt      time.Time  `json:"created_at"`

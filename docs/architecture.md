@@ -9,6 +9,7 @@
 `mtprotor` is a long-running runtime manager that accepts client connections and validates MTProxy secrets from handshake bytes against an in-memory secret store. Secrets are updated through local API/CLI **without restarting the manager process**.
 
 For protocol compatibility, each enabled secret is served by a dedicated backend worker process (official MTProto proxy command template, configurable). Dispatcher routes each new connection to the worker matched by secret.
+Worker ports are local-only (`127.0.0.1`) by default; clients only reach the main public listener.
 
 ## Runtime Flow
 1. Client connects to public listener (`listen_addr`).
@@ -53,5 +54,6 @@ For protocol compatibility, each enabled secret is served by a dedicated backend
 
 ## Security Defaults
 - API bound to Unix socket with strict file mode.
+- Worker listeners bound to loopback by default.
 - Secret values never returned in full by list APIs.
 - Optional per-secret expiration and connection limits.

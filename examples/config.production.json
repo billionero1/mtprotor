@@ -13,7 +13,11 @@
       "--listen",
       "{{port}}",
       "--secret",
-      "{{secret}}"
+      "{{secret}}",
+      "--bind",
+      "127.0.0.1",
+      "--tls-domain",
+      "{{tls_domain}}"
     ],
     "env": {},
     "port_range_start": 29000,

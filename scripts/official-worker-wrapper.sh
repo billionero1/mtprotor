@@ -3,6 +3,8 @@ set -euo pipefail
 
 LISTEN_PORT=""
 SECRET_HEX=""
+BIND_ADDR="${MTPROXY_BIND_ADDR:-127.0.0.1}"
+TLS_DOMAIN="${MTPROXY_TLS_DOMAIN:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -14,6 +16,14 @@ while [[ $# -gt 0 ]]; do
       SECRET_HEX="${2:-}"
       shift 2
       ;;
+    --bind)
+      BIND_ADDR="${2:-}"
+      shift 2
+      ;;
+    --tls-domain)
+      TLS_DOMAIN="${2:-}"
+      shift 2
+      ;;
     *)
       echo "unknown arg: $1" >&2
       exit 2
@@ -22,7 +32,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$LISTEN_PORT" || -z "$SECRET_HEX" ]]; then
-  echo "usage: $0 --listen <port> --secret <hex>" >&2
+  echo "usage: $0 --listen <port> --secret <hex> [--bind <addr>] [--tls-domain <domain>]" >&2
   exit 2
 fi
 
@@ -57,6 +67,12 @@ fi
 declare -a CMD=("$MTPROXY_BIN")
 CMD+=("${BASE_ARGS[@]}")
 CMD+=(-p "$PLAIN_PORT" -H "$LISTEN_PORT" -S "$SECRET_HEX")
+if [[ -n "$BIND_ADDR" ]]; then
+  CMD+=(--address "$BIND_ADDR")
+fi
+if [[ -n "$TLS_DOMAIN" ]]; then
+  CMD+=(-D "$TLS_DOMAIN")
+fi
 if [[ -n "${MTPROXY_CONFIG_FILE:-}" ]]; then
   CMD+=("${MTPROXY_CONFIG_FILE}")
 fi
