@@ -97,7 +97,8 @@ if [[ ! -f /etc/default/mtprotor ]]; then
 # Base args passed to official mtproto-proxy for each secret worker.
 # Do not include -p/-H/-S here: wrapper sets them per secret worker.
 MTPROXY_BIN=/usr/local/bin/mtproto-proxy
-MTPROXY_BASE_ARGS="--aes-pwd /etc/mtprotor/proxy-multi.conf --aes-key /etc/mtprotor/proxy-secret"
+MTPROXY_BASE_ARGS="--aes-pwd /etc/mtprotor/proxy-secret"
+MTPROXY_CONFIG_FILE=/etc/mtprotor/proxy-multi.conf
 MTPROXY_PLAIN_PORT_OFFSET=10000
 ENVEOF
   chmod 0640 /etc/default/mtprotor

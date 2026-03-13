@@ -48,12 +48,17 @@ if [[ ! -x "$MTPROXY_BIN" ]]; then
   exit 1
 fi
 
-if [[ -z "${MTPROXY_BASE_ARGS:-}" ]]; then
-  echo "MTPROXY_BASE_ARGS is empty. Set at least --aes-pwd/--aes-key in /etc/default/mtprotor." >&2
-  exit 1
+declare -a BASE_ARGS=()
+if [[ -n "${MTPROXY_BASE_ARGS:-}" ]]; then
+  # shellcheck disable=SC2206
+  BASE_ARGS=( ${MTPROXY_BASE_ARGS} )
 fi
 
-# shellcheck disable=SC2206
-BASE_ARGS=( ${MTPROXY_BASE_ARGS} )
+declare -a CMD=("$MTPROXY_BIN")
+CMD+=("${BASE_ARGS[@]}")
+CMD+=(-p "$PLAIN_PORT" -H "$LISTEN_PORT" -S "$SECRET_HEX")
+if [[ -n "${MTPROXY_CONFIG_FILE:-}" ]]; then
+  CMD+=("${MTPROXY_CONFIG_FILE}")
+fi
 
-exec "$MTPROXY_BIN" "${BASE_ARGS[@]}" -p "$PLAIN_PORT" -H "$LISTEN_PORT" -S "$SECRET_HEX"
+exec "${CMD[@]}"

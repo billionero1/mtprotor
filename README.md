@@ -179,8 +179,9 @@ Important fields:
 
 When using official worker wrapper (`/usr/local/bin/mtproto-worker-wrapper.sh`):
 
-- set `MTPROXY_BASE_ARGS` in `/etc/default/mtprotor` with shared params like `--aes-pwd` and `--aes-key`
+- set `MTPROXY_BASE_ARGS` in `/etc/default/mtprotor` with shared params (default: `--aes-pwd /etc/mtprotor/proxy-secret`)
 - do not include `-p/-H/-S` in `MTPROXY_BASE_ARGS` (wrapper injects them per secret worker)
+- set `MTPROXY_CONFIG_FILE=/etc/mtprotor/proxy-multi.conf` for binaries that expect config as positional argument
 - optional `MTPROXY_PLAIN_PORT_OFFSET` controls derived plain port (`-p`)
 - example env file: `examples/mtprotor.env`
 
