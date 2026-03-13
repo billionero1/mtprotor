@@ -250,8 +250,8 @@ collect_service_snapshot() {
   active_secrets=0
   if [[ -S "$SOCK" ]]; then
     status_json="$(request GET /v1/status 2>/dev/null || true)"
-    total="$(echo "$status_json" | sed -n 's/.*\"total\":\\([0-9][0-9]*\\).*/\\1/p')"
-    active_secrets="$(echo "$status_json" | sed -n 's/.*\"active\":\\([0-9][0-9]*\\).*/\\1/p')"
+    total="$(echo "$status_json" | sed -n 's/.*"total":\([0-9][0-9]*\).*/\1/p')"
+    active_secrets="$(echo "$status_json" | sed -n 's/.*"active":\([0-9][0-9]*\).*/\1/p')"
     [[ -n "$total" ]] || total=0
     [[ -n "$active_secrets" ]] || active_secrets=0
   fi
