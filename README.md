@@ -134,7 +134,7 @@ Menu includes:
 - change client port
 - change bootstrap secret
 - change public host
-- change stealth mode (`plain/dd/ee`)
+- stealth presets/mode (`standard`, `max-camouflage`, `compatibility`, or custom `plain/dd/ee`)
 - restart service
 - bot SSH settings (change login/password/allow-from)
 - force run expired-user disable
@@ -157,11 +157,17 @@ proxyctl config set admin-token <token>
 proxyctl config set secret-prefix ee
 # alias:
 proxyctl config set stealth-mode plain
+proxyctl config set stealth-preset standard
 ```
 
 Notes:
 - Port/token changes restart service when required.
 - Bootstrap secret change is applied via runtime API and persisted.
+
+Stealth modes (simple):
+- `plain` = no prefix, max compatibility, minimum camouflage.
+- `dd` = default balanced mode (good compatibility + practical camouflage).
+- `ee` = more TLS-like behavior, maximum camouflage from available modes.
 
 ## External Control for Bot (from another server)
 Recommended production method: **SSH to proxy server and run `proxyctl bot ...`**.

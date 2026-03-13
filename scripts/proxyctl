@@ -98,6 +98,7 @@ Usage:
   proxyctl config set admin-token <token>
   proxyctl config set secret-prefix <plain|dd|ee>
   proxyctl config set stealth-mode <plain|dd|ee>
+  proxyctl config set stealth-preset <standard|max-camouflage|compatibility>
 
   proxyctl secret list [--table]
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
@@ -409,6 +410,44 @@ normalize_secret_prefix() {
   esac
 }
 
+stealth_preset_to_mode() {
+  local preset="${1:-}"
+  case "${preset,,}" in
+    standard|std|default|balanced)
+      echo "dd"
+      ;;
+    max-camouflage|max-camouflage|max|camouflage|ee|tls)
+      echo "ee"
+      ;;
+    compatibility|compat|plain)
+      echo "plain"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+print_stealth_explain() {
+  cat <<TXT
+Stealth modes:
+  plain
+    - Secret in link is just 32 hex (no prefix).
+    - Best for compatibility/debug cases.
+    - Least camouflage.
+
+  dd (Standard)
+    - Secret in link uses dd<secret>.
+    - Default balanced mode for most deployments.
+    - Good compatibility with practical obfuscation.
+
+  ee (Max camouflage)
+    - Secret in link uses ee<secret>[optional suffix].
+    - More TLS-like transport behavior.
+    - Best when you need stronger camouflage.
+TXT
+}
+
 show_links() {
   local sec="$1"
   local host="${2:-$PUBLIC_HOST}"
@@ -623,6 +662,15 @@ cmd_config_set() {
       update_env_key SECRET_PREFIX "$val"
       SECRET_PREFIX="$val"
       echo "secret-prefix updated (mode: $(stealth_mode_name "$val"))"
+      cmd_link
+      ;;
+    stealth-preset)
+      if ! val="$(stealth_preset_to_mode "$val")"; then
+        die "stealth-preset must be standard, max-camouflage or compatibility"
+      fi
+      update_env_key SECRET_PREFIX "$val"
+      SECRET_PREFIX="$val"
+      echo "stealth-preset applied (mode: $(stealth_mode_name "$val"))"
       cmd_link
       ;;
     *)
@@ -1050,6 +1098,52 @@ menu_bot_settings() {
   done
 }
 
+menu_stealth_settings() {
+  while true; do
+    local current
+    current="$(stealth_mode_name)"
+    echo
+    echo "-------- $(paint "$C_BOLD" "Bulldog Stealth Settings") --------"
+    echo "Current mode: $(paint "$C_CYAN" "$current")"
+    echo "1) Standard (dd)"
+    echo "2) Max camouflage (ee)"
+    echo "3) Compatibility (plain)"
+    echo "4) Set custom mode (plain/dd/ee)"
+    echo "5) Explain modes"
+    echo "0) Back"
+    printf "Select: "
+    IFS= read -r sch || true
+    case "$sch" in
+      1)
+        run_safe cmd_config_set stealth-preset standard
+        ;;
+      2)
+        run_safe cmd_config_set stealth-preset max-camouflage
+        ;;
+      3)
+        run_safe cmd_config_set stealth-preset compatibility
+        ;;
+      4)
+        printf "Mode (plain/dd/ee): "
+        IFS= read -r mode || true
+        [[ -n "$mode" ]] && run_safe cmd_config_set stealth-mode "$mode"
+        ;;
+      5)
+        print_stealth_explain
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        warn "Unknown option"
+        ;;
+    esac
+    echo
+    printf "Press Enter to continue... "
+    IFS= read -r _ || true
+  done
+}
+
 menu_cmd() {
   while true; do
     menu_header
@@ -1066,7 +1160,7 @@ menu_cmd() {
     echo "8) Change client port (restart)"
     echo "9) Rotate bootstrap secret"
     echo "10) Change public host"
-    echo "11) Change stealth mode (plain/dd/ee)"
+    echo "11) Stealth presets / mode"
     echo
     echo "[Users / Subscriptions]"
     echo "12) List users (table)"
@@ -1120,9 +1214,7 @@ menu_cmd() {
         [[ -n "$newhost" ]] && run_safe cmd_config_set public-host "$newhost"
         ;;
       11)
-        printf "Stealth mode (plain/dd/ee): "
-        IFS= read -r mode || true
-        [[ -n "$mode" ]] && run_safe cmd_config_set stealth-mode "$mode"
+        run_safe menu_stealth_settings
         ;;
       12)
         run_safe cmd_secret list --table
