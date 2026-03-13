@@ -25,7 +25,7 @@ echo "[1/5] status"
 mtprotor status >/dev/null
 
 echo "[2/5] add secret"
-ADD_OUT="$(mtprotor secret add "$SECRET" --label "$LABEL")"
+ADD_OUT="$(mtprotor secret add --label "$LABEL" "$SECRET")"
 ID="$(printf '%s\n' "$ADD_OUT" | sed -n 's/.*"id": "\([^"]*\)".*/\1/p' | head -n1)"
 if [[ -z "$ID" ]]; then
   echo "failed to parse secret id from add output" >&2
