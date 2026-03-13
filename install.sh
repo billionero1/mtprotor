@@ -33,8 +33,14 @@ fi
 
 is_interactive=0
 tty_fd=9
-if exec {tty_fd}<>/dev/tty 2>/dev/null; then
-  is_interactive=1
+if [[ -t 1 ]]; then
+  set +e
+  exec {tty_fd}<>/dev/tty 2>/dev/null
+  tty_open_rc=$?
+  set -e
+  if (( tty_open_rc == 0 )); then
+    is_interactive=1
+  fi
 fi
 
 rand_hex16() {
