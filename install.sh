@@ -154,6 +154,7 @@ else
 fi
 
 echo "[4/8] Building mtproto-proxy..."
+make -C "$INSTALL_DIR" clean
 make -C "$INSTALL_DIR" -j"$(nproc)"
 install -m 0755 "$INSTALL_DIR/objs/bin/mtproto-proxy" "$BIN_PATH"
 
