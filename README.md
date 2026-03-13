@@ -34,6 +34,10 @@ Installer does:
 8. systemd install/start + expire-sync timer
 9. health checks + ready links
 
+Installer validation notes:
+- Bot SSH username must match Linux login pattern: `^[a-z_][a-z0-9_-]{1,30}$` (lowercase).
+- If invalid username is entered, installer now shows reason and suggests normalized value.
+
 After install:
 - service: `mtproxy-fork.service`
 - binary: `/usr/local/bin/mtproto-proxy-fork`

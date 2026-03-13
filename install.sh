@@ -270,8 +270,31 @@ prompt_yes_no CLEAN_OLD "Delete old mtproxy/mtprotor installations first" "yes"
 prompt_yes_no REFRESH_TG_CONFIG "Refresh Telegram proxy-secret/proxy-multi.conf" "yes"
 prompt_yes_no BOT_SSH_SETUP "Configure SSH bot credentials (login/password) now" "yes"
 if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
-  prompt_nonempty BOT_SSH_USER "Bot SSH username" "$BOT_SSH_USER"
-  [[ "$BOT_SSH_USER" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]] || die "Invalid bot SSH username"
+  while true; do
+    prompt_nonempty BOT_SSH_USER "Bot SSH username" "$BOT_SSH_USER"
+    if [[ "$BOT_SSH_USER" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]]; then
+      break
+    fi
+    suggestion="$(printf '%s' "$BOT_SSH_USER" \
+      | tr '[:upper:]' '[:lower:]' \
+      | sed -E 's/[^a-z0-9_-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+    if [[ -z "$suggestion" || ! "$suggestion" =~ ^[a-z_] ]]; then
+      suggestion="mtproxybot"
+    fi
+    suggestion="${suggestion:0:31}"
+    if (( is_interactive )); then
+      warn "Invalid bot SSH username: '$BOT_SSH_USER'"
+      warn "Allowed pattern: ^[a-z_][a-z0-9_-]{1,30}$ (lowercase only)"
+      prompt_yes_no use_suggest "Use normalized username '$suggestion'" "yes"
+      if [[ "$use_suggest" == "yes" ]]; then
+        BOT_SSH_USER="$suggestion"
+        break
+      fi
+      warn "Please enter username again"
+      continue
+    fi
+    die "Invalid bot SSH username '$BOT_SSH_USER'. Allowed pattern: ^[a-z_][a-z0-9_-]{1,30}$. Suggested: $suggestion"
+  done
   prompt_nonempty BOT_SSH_ALLOW_FROM "Allowed bot source IP/CIDR (required)" "$BOT_SSH_ALLOW_FROM"
   if [[ "${BOT_SSH_ALLOW_FROM,,}" == "any" ]]; then
     die "allow-from cannot be 'any' in installer secure mode"
