@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONF_FILE="/etc/mtproxy-fork/bot-http.env"
+SERVICE="mtproxy-fork-bot-api.service"
+
+USER_NAME="botapi"
+PASSWORD=""
+API_KEY=""
+BASE_PATH=""
+LISTEN="0.0.0.0"
+PORT="9443"
+ALLOW_FROM=""
+ALLOW_SET=0
+SHOW_ONLY=0
+SHOW_JSON=1
+REGEN_PASSWORD=0
+REGEN_API_KEY=0
+REGEN_BASE_PATH=0
+
+rand_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24
+    return
+  fi
+  od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+rand_hex32() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 32
+    return
+  fi
+  od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+rand_base_path() {
+  local v
+  v="$(openssl rand -hex 8 2>/dev/null || od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  echo "/api-${v}"
+}
+
+detect_host() {
+  local h
+  h="$(curl -4 -fsSL --max-time 4 https://api.ipify.org 2>/dev/null || true)"
+  if [[ -n "$h" ]]; then
+    echo "$h"
+    return
+  fi
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+detect_ssh_client_ip() {
+  local ip=""
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    ip="$(awk '{print $1}' <<<"$SSH_CONNECTION")"
+  elif [[ -n "${SSH_CLIENT:-}" ]]; then
+    ip="$(awk '{print $1}' <<<"$SSH_CLIENT")"
+  fi
+  echo "$ip"
+}
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+die() {
+  printf '{"ok":false,"error":"%s"}\n' "$(json_escape "$1")"
+  exit 1
+}
+
+require_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || return 1
+  (( p >= 1 && p <= 65535 )) || return 1
+  return 0
+}
+
+validate_user() {
+  [[ "$1" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]]
+}
+
+validate_base_path() {
+  local p="$1"
+  [[ "$p" == /* ]] || return 1
+  [[ "$p" != *" "* ]] || return 1
+  [[ ${#p} -ge 2 ]] || return 1
+  [[ "$p" != *"//"* ]] || return 1
+  return 0
+}
+
+validate_allow_from() {
+  local raw="$1"
+  [[ -n "$raw" ]] || return 1
+  [[ "$raw" != *" "* ]] || return 1
+  [[ "$raw" =~ ^[0-9A-Fa-f:.,/_-]+$ ]] || return 1
+  return 0
+}
+
+show_profile() {
+  local host
+  host="$(detect_host)"
+  printf '{"ok":true,"scheme":"http","host":"%s","port":%s,"base_path":"%s","username":"%s","password":"%s","api_key":"%s","allow_from":"%s","listen":"%s"}\n' \
+    "$(json_escape "$host")" \
+    "$PORT" \
+    "$(json_escape "$BASE_PATH")" \
+    "$(json_escape "$USER_NAME")" \
+    "$(json_escape "$PASSWORD")" \
+    "$(json_escape "$API_KEY")" \
+    "$(json_escape "$ALLOW_FROM")" \
+    "$(json_escape "$LISTEN")"
+}
+
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  die "run as root"
+fi
+
+if [[ -r "$CONF_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONF_FILE"
+  USER_NAME="${BOT_HTTP_USER:-$USER_NAME}"
+  PASSWORD="${BOT_HTTP_PASSWORD:-$PASSWORD}"
+  API_KEY="${BOT_HTTP_API_KEY:-$API_KEY}"
+  BASE_PATH="${BOT_HTTP_BASE_PATH:-$BASE_PATH}"
+  LISTEN="${BOT_HTTP_LISTEN:-$LISTEN}"
+  PORT="${BOT_HTTP_PORT:-$PORT}"
+  ALLOW_FROM="${BOT_HTTP_ALLOW_FROM:-$ALLOW_FROM}"
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --show)
+      SHOW_ONLY=1; shift ;;
+    --text)
+      SHOW_JSON=0; shift ;;
+    --user)
+      USER_NAME="${2:-}"; shift 2 ;;
+    --password)
+      PASSWORD="${2:-}"; shift 2 ;;
+    --api-key)
+      API_KEY="${2:-}"; shift 2 ;;
+    --base-path)
+      BASE_PATH="${2:-}"; shift 2 ;;
+    --listen)
+      LISTEN="${2:-}"; shift 2 ;;
+    --port)
+      PORT="${2:-}"; shift 2 ;;
+    --allow-from)
+      ALLOW_FROM="${2:-}"; ALLOW_SET=1; shift 2 ;;
+    --allow-any)
+      ALLOW_FROM=""; ALLOW_SET=1; shift ;;
+    --regen-password)
+      REGEN_PASSWORD=1; shift ;;
+    --regen-api-key)
+      REGEN_API_KEY=1; shift ;;
+    --regen-base-path)
+      REGEN_BASE_PATH=1; shift ;;
+    *)
+      die "unknown option: $1"
+      ;;
+  esac
+done
+
+if (( SHOW_ONLY )); then
+  show_profile
+  exit 0
+fi
+
+validate_user "$USER_NAME" || die "invalid username"
+require_port "$PORT" || die "invalid port"
+[[ -n "$LISTEN" ]] || die "listen address cannot be empty"
+
+if (( REGEN_PASSWORD )) || [[ -z "$PASSWORD" ]]; then
+  PASSWORD="$(rand_password)"
+fi
+if (( REGEN_API_KEY )) || [[ -z "$API_KEY" ]]; then
+  API_KEY="$(rand_hex32)"
+fi
+if (( REGEN_BASE_PATH )) || [[ -z "$BASE_PATH" ]]; then
+  BASE_PATH="$(rand_base_path)"
+fi
+
+[[ ${#PASSWORD} -ge 10 ]] || die "password too short (min 10 chars)"
+[[ "$API_KEY" =~ ^[0-9a-fA-F]{64}$ ]] || die "api key must be 64 hex chars"
+validate_base_path "$BASE_PATH" || die "base path must start with '/' and contain no spaces"
+
+if (( ALLOW_SET == 0 )) && [[ -z "$ALLOW_FROM" ]]; then
+  ALLOW_FROM="$(detect_ssh_client_ip)"
+  [[ -n "$ALLOW_FROM" ]] || ALLOW_FROM="127.0.0.1"
+fi
+if [[ -n "$ALLOW_FROM" ]]; then
+  validate_allow_from "$ALLOW_FROM" || die "allow-from contains unsupported characters"
+fi
+
+if ! getent group mtproxy >/dev/null 2>&1; then
+  die "group mtproxy not found; install mtproxy first"
+fi
+
+install -d -m 0750 -o root -g mtproxy /etc/mtproxy-fork
+
+tmp="$(mktemp)"
+{
+  printf 'BOT_HTTP_LISTEN=%q\n' "$LISTEN"
+  printf 'BOT_HTTP_PORT=%q\n' "$PORT"
+  printf 'BOT_HTTP_BASE_PATH=%q\n' "$BASE_PATH"
+  printf 'BOT_HTTP_USER=%q\n' "$USER_NAME"
+  printf 'BOT_HTTP_PASSWORD=%q\n' "$PASSWORD"
+  printf 'BOT_HTTP_API_KEY=%q\n' "${API_KEY,,}"
+  printf 'BOT_HTTP_ALLOW_FROM=%q\n' "$ALLOW_FROM"
+  printf 'BOT_HTTP_REQUIRE_API_KEY=%q\n' "1"
+  printf 'BOT_HTTP_RATE_LIMIT_RPM=%q\n' "180"
+  printf 'BOT_HTTP_BAN_AFTER_FAILS=%q\n' "8"
+  printf 'BOT_HTTP_BAN_WINDOW_SECONDS=%q\n' "300"
+  printf 'BOT_HTTP_BAN_SECONDS=%q\n' "900"
+  printf 'BOT_HTTP_BODY_LIMIT_BYTES=%q\n' "8192"
+  printf 'BOT_HTTP_TRUST_X_FORWARDED_FOR=%q\n' "0"
+  printf 'BOT_HTTP_UPDATED_AT=%q\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "$tmp"
+install -m 0640 -o root -g mtproxy "$tmp" "$CONF_FILE"
+rm -f "$tmp"
+
+if [[ -f "/etc/systemd/system/$SERVICE" ]]; then
+  systemctl daemon-reload
+  systemctl enable --now "$SERVICE"
+  systemctl restart "$SERVICE"
+  systemctl is-active --quiet "$SERVICE" || die "bot api service failed"
+fi
+
+if (( SHOW_JSON )); then
+  show_profile
+else
+  echo "OK"
+  echo "scheme=http"
+  echo "host=$(detect_host)"
+  echo "port=$PORT"
+  echo "base_path=$BASE_PATH"
+  echo "username=$USER_NAME"
+  echo "password=$PASSWORD"
+  echo "api_key=${API_KEY,,}"
+  echo "allow_from=$ALLOW_FROM"
+  echo "listen=$LISTEN"
+fi

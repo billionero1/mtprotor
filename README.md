@@ -11,6 +11,7 @@ Production-focused MTProxy fork with **runtime hot reload of secrets/users** (no
 - Persistent state on disk (`secrets.tsv`) with restore on service start.
 - Local admin API over Unix socket (HTTP/JSON + legacy line protocol).
 - `proxyctl` CLI and interactive terminal menu.
+- Optional Bot HTTP Bridge (`host + base_path + login/password + api_key`) for panel-like bot integration.
 - One-command installer for Ubuntu 24.04.
 
 ## Important Operational Notes
@@ -31,8 +32,9 @@ Installer does:
 5. Telegram config download (`proxy-secret`, `proxy-multi.conf`)
 6. bootstrap secret + admin token setup (stored in `/etc/mtproxy-fork/admin.token`)
 7. auto-generate bot SSH login/password (x3-ui style) + forced-command profile with required `allow-from`
-8. systemd install/start + expire-sync timer
-9. health checks + ready links
+8. auto-generate bot HTTP API profile (base_path + login/password + api_key + allow-from)
+9. systemd install/start + expire-sync timer (+ optional bot api service)
+10. health checks + ready links
 
 Installer validation notes:
 - Bot SSH username must match Linux login pattern: `^[a-z_][a-z0-9_-]{1,30}$` (lowercase).
@@ -46,11 +48,15 @@ After install:
 - menu: `/usr/local/bin/dogmenu` (compat: `/usr/local/bin/mtproxymenu`)
 - bot SSH dispatcher: `/usr/local/bin/proxybot-dispatch`
 - bot SSH password setup: `/usr/local/bin/mtproxybot-setup`
+- bot HTTP bridge daemon: `/usr/local/bin/proxybot-httpd`
+- bot HTTP profile setup: `/usr/local/bin/mtproxybot-http-setup`
 - env/config: `/etc/default/mtproxy-fork`
 - admin token file: `/etc/mtproxy-fork/admin.token`
 - secrets state: `/var/lib/mtproxy-fork/secrets.tsv`
 - bot credentials cache: `/etc/mtproxy-fork/bot-access.env`
+- bot http credentials cache: `/etc/mtproxy-fork/bot-http.env`
 - expire timer: `mtproxy-fork-expire-sync.timer` (disables expired users)
+- bot api service: `mtproxy-fork-bot-api.service`
 
 ## Telegram Link Format (iOS)
 For iOS clipboard import, use:
@@ -89,6 +95,9 @@ proxyctl service restart
 proxyctl service logs
 proxyctl service update
 proxyctl health
+proxyctl bot api show
+proxyctl bot api status
+proxyctl bot api restart
 ```
 
 `proxyctl service status` is compact by default (active status, PID, memory, CPU, listener, secret counters).
@@ -147,6 +156,7 @@ Menu includes:
 - set/disable TLS cover domain (for domain camouflage)
 - restart service
 - bot SSH settings (change login/password/allow-from)
+- bot HTTP API settings (change base_path/login/password/api_key/allow-from)
 - force run expired-user disable
 
 When link-related params change, default links are reprinted.
@@ -190,7 +200,50 @@ TLS cover domain (optional):
 - Disable with `proxyctl config set tls-domain off`.
 
 ## External Control for Bot (from another server)
-Recommended production method: **SSH to proxy server and run `proxyctl bot ...`**.
+Recommended production method for panel-like bot integration: **Bot HTTP Bridge**.
+
+Show/rotate credentials:
+```bash
+proxyctl bot api show
+proxyctl bot api rotate-password
+proxyctl bot api rotate-key
+proxyctl bot api set --user botapi --port 9443 --base-path /api-xxxx --allow-from <BOT_SERVER_IP>
+```
+
+Service control:
+```bash
+proxyctl bot api status
+proxyctl bot api restart
+```
+
+HTTP contract (all JSON):
+- `GET <base_path>/health`
+- `GET <base_path>/secrets`
+- `POST <base_path>/issue` body: `{"label":"user_1001","days":30}`
+- `POST <base_path>/enable` body: `{"secret":"<hex32>"}`
+- `POST <base_path>/disable` body: `{"secret":"<hex32>"}`
+- `POST <base_path>/revoke` body: `{"secret":"<hex32>"}`
+
+Required auth headers:
+- `Authorization: Basic base64(login:password)`
+- `X-API-Key: <api_key>`
+
+Example:
+```bash
+curl -sS -u 'botapi:<PASSWORD>' -H 'X-API-Key: <API_KEY>' \
+  "http://<HOST>:9443/<BASE_PATH>/health"
+```
+
+Security defaults:
+- source IP/CIDR allowlist (`allow-from`)
+- per-IP rate limit
+- temporary block on repeated auth failures
+- local proxy runtime API remains unix-socket only
+
+SSH forced-command remains available as fallback:
+```bash
+proxyctl bot ssh show
+```
 
 If your third-party bot requires **IP + login + password**, use:
 ```bash
@@ -222,11 +275,11 @@ This gives full lifecycle control for subscriptions:
 3. remove on final expiry
 
 ### Security recommendations for bot integration
-- Create dedicated SSH key for bot.
-- Restrict source IPs in firewall.
-- Prefer dedicated low-privilege account with limited sudo rule for `proxyctl` if needed.
-- Keep admin API on Unix socket local-only (default). Do not expose to internet.
-- Use forced command mode with `proxybot-dispatch` (no shell, no port forwarding).
+- Keep runtime admin API on Unix socket local-only (default).
+- Restrict bot API source via allow-from CIDR and firewall.
+- Prefer private network path (WireGuard/Tailscale) between bot server and proxy node.
+- Rotate bot api password and api key periodically.
+- Keep SSH forced-command channel as emergency fallback.
 
 Full bot template:
 - `docs/BOT_INTEGRATION_TEMPLATE.md`

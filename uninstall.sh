@@ -13,6 +13,9 @@ DOG_MENU_PATH="/usr/local/bin/dogmenu"
 DOG_CTL_PATH="/usr/local/bin/dogctl"
 DISPATCH_PATH="/usr/local/bin/proxybot-dispatch"
 BOT_SETUP_PATH="/usr/local/bin/mtproxybot-setup"
+BOT_HTTPD_PATH="/usr/local/bin/proxybot-httpd"
+BOT_HTTP_SETUP_PATH="/usr/local/bin/mtproxybot-http-setup"
+BOT_HTTP_UNIT_FILE="/etc/systemd/system/mtproxy-fork-bot-api.service"
 CONF_DIR="/etc/mtproxy-fork"
 DATA_DIR="/var/lib/mtproxy-fork"
 ENV_FILE="/etc/default/mtproxy-fork"
@@ -38,14 +41,14 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   exit 1
 fi
 
-systemctl disable --now "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-fork-expire-sync.service 2>/dev/null || true
-rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE"
+systemctl disable --now "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-fork-expire-sync.service mtproxy-fork-bot-api.service 2>/dev/null || true
+rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" "$BOT_HTTP_UNIT_FILE"
 systemctl daemon-reload
 
-rm -f "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
+rm -f "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH" "$BOT_HTTPD_PATH" "$BOT_HTTP_SETUP_PATH"
 
 if (( PURGE_DATA )); then
-  rm -rf "$CONF_DIR" "$DATA_DIR" "$ENV_FILE" /etc/mtproxy-fork/bot-access.env
+  rm -rf "$CONF_DIR" "$DATA_DIR" "$ENV_FILE" /etc/mtproxy-fork/bot-access.env /etc/mtproxy-fork/bot-http.env
   if id -u mtproxy >/dev/null 2>&1; then
     userdel mtproxy 2>/dev/null || true
   fi

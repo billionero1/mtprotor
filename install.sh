@@ -21,6 +21,9 @@ DOG_MENU_PATH="/usr/local/bin/dogmenu"
 DOG_CTL_PATH="/usr/local/bin/dogctl"
 DISPATCH_PATH="/usr/local/bin/proxybot-dispatch"
 BOT_SETUP_PATH="/usr/local/bin/mtproxybot-setup"
+BOT_HTTPD_PATH="/usr/local/bin/proxybot-httpd"
+BOT_HTTP_SETUP_PATH="/usr/local/bin/mtproxybot-http-setup"
+BOT_HTTP_UNIT_FILE="/etc/systemd/system/mtproxy-fork-bot-api.service"
 ADMIN_TOKEN_FILE="$CONF_DIR/admin.token"
 
 CLIENT_PORT="443"
@@ -36,6 +39,14 @@ BOT_SSH_SETUP="yes"
 BOT_SSH_USER="mtproxybot"
 BOT_SSH_ALLOW_FROM=""
 BOT_SSH_PASSWORD=""
+BOT_HTTP_SETUP="yes"
+BOT_HTTP_LISTEN="0.0.0.0"
+BOT_HTTP_PORT="9443"
+BOT_HTTP_USER="botapi"
+BOT_HTTP_ALLOW_FROM=""
+BOT_HTTP_PASSWORD=""
+BOT_HTTP_API_KEY=""
+BOT_HTTP_BASE_PATH=""
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "Run as root: curl -fsSL <repo>/install.sh | sudo bash" >&2
@@ -111,6 +122,16 @@ rand_bootstrap_secret() {
       *) echo "$s"; return 0 ;;
     esac
   done
+}
+
+rand_base_path() {
+  local r
+  if command -v openssl >/dev/null 2>&1; then
+    r="$(openssl rand -hex 8)"
+  else
+    r="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  fi
+  echo "/api-$r"
 }
 
 detect_public_host() {
@@ -265,6 +286,10 @@ BOT_SSH_ALLOW_FROM="$(detect_ssh_client_ip)"
 if [[ -z "$BOT_SSH_ALLOW_FROM" ]]; then
   BOT_SSH_ALLOW_FROM="127.0.0.1"
 fi
+BOT_HTTP_ALLOW_FROM="$BOT_SSH_ALLOW_FROM"
+BOT_HTTP_PASSWORD="$(rand_password)"
+BOT_HTTP_API_KEY="$(rand_hex16)$(rand_hex16)"
+BOT_HTTP_BASE_PATH="$(rand_base_path)"
 
 say "Installer mode: $([[ $is_interactive -eq 1 ]] && echo interactive || echo non-interactive)"
 
@@ -332,12 +357,28 @@ if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   fi
   BOT_SSH_PASSWORD="$(rand_password)"
 fi
+prompt_yes_no BOT_HTTP_SETUP "Configure Bot HTTP API (host/base_path/login/password) now" "yes"
+if [[ "$BOT_HTTP_SETUP" == "yes" ]]; then
+  prompt_port BOT_HTTP_PORT "Bot HTTP API port" "$BOT_HTTP_PORT"
+  prompt_nonempty BOT_HTTP_USER "Bot HTTP API username" "$BOT_HTTP_USER"
+  if [[ ! "$BOT_HTTP_USER" =~ ^[a-z_][a-z0-9_-]{1,30}$ ]]; then
+    die "Invalid Bot HTTP username '$BOT_HTTP_USER'. Allowed pattern: ^[a-z_][a-z0-9_-]{1,30}$"
+  fi
+  prompt_nonempty BOT_HTTP_ALLOW_FROM "Allowed bot source IP/CIDR for HTTP API (required)" "$BOT_HTTP_ALLOW_FROM"
+  if [[ "${BOT_HTTP_ALLOW_FROM,,}" == "any" ]]; then
+    die "Bot HTTP allow-from cannot be 'any' in installer secure mode"
+  fi
+  prompt_default BOT_HTTP_BASE_PATH "Bot HTTP base path (example: /api-xxxx)" "$BOT_HTTP_BASE_PATH"
+  if [[ "$BOT_HTTP_BASE_PATH" != /* ]] || [[ "$BOT_HTTP_BASE_PATH" == */ ]]; then
+    die "Bot HTTP base path must start with '/' and must not end with '/'"
+  fi
+fi
 
 say "[1/9] Installing build dependencies..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
-  ca-certificates curl git make gcc libc6-dev libssl-dev zlib1g-dev
+  ca-certificates curl git make gcc libc6-dev libssl-dev zlib1g-dev python3
 
 cleanup_old() {
   say "[2/9] Removing old services/processes/files..."
@@ -345,7 +386,8 @@ cleanup_old() {
   rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
-  rm -f "$ENV_FILE" "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH"
+  systemctl disable --now mtproxy-fork-bot-api.service 2>/dev/null || true
+  rm -f "$ENV_FILE" "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH" "$BOT_HTTPD_PATH" "$BOT_HTTP_SETUP_PATH" "$BOT_HTTP_UNIT_FILE"
   systemctl daemon-reload || true
 }
 
@@ -436,6 +478,9 @@ install -m 0755 "$INSTALL_DIR/scripts/dogctl" "$DOG_CTL_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/dogmenu" "$DOG_MENU_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/proxybot-dispatch" "$DISPATCH_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/mtproxybot-setup" "$BOT_SETUP_PATH"
+install -m 0755 "$INSTALL_DIR/scripts/proxybot-httpd" "$BOT_HTTPD_PATH"
+install -m 0755 "$INSTALL_DIR/scripts/mtproxybot-http-setup" "$BOT_HTTP_SETUP_PATH"
+install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-bot-api.service" "$BOT_HTTP_UNIT_FILE"
 cat > "$MENU_PATH" <<'MENU'
 #!/usr/bin/env bash
 exec /usr/local/bin/dogmenu "$@"
@@ -459,6 +504,17 @@ say "[8/9] Enabling and starting service..."
 systemctl daemon-reload
 systemctl enable --now "$SERVICE_NAME"
 systemctl enable --now mtproxy-fork-expire-sync.timer
+BOT_HTTP_SETUP_OUTPUT=""
+if [[ "$BOT_HTTP_SETUP" == "yes" ]]; then
+  say "[8.1/9] Configuring bot HTTP API profile..."
+  http_cmd=("$BOT_HTTP_SETUP_PATH" --listen "$BOT_HTTP_LISTEN" --port "$BOT_HTTP_PORT" --user "$BOT_HTTP_USER" --password "$BOT_HTTP_PASSWORD" --api-key "$BOT_HTTP_API_KEY" --base-path "$BOT_HTTP_BASE_PATH" --allow-from "$BOT_HTTP_ALLOW_FROM")
+  if ! BOT_HTTP_SETUP_OUTPUT="$("${http_cmd[@]}")"; then
+    die "Failed to configure bot HTTP API profile"
+  fi
+  if [[ "$BOT_HTTP_SETUP_OUTPUT" != *'"ok":true'* ]]; then
+    die "Bot HTTP API setup returned error: $BOT_HTTP_SETUP_OUTPUT"
+  fi
+fi
 sleep 1
 
 say "[9/9] Post-checks..."
@@ -521,6 +577,18 @@ if [[ "$BOT_SSH_SETUP" == "yes" ]]; then
   say "  password=$BOT_SSH_PASSWORD"
   say "  allow_from=$BOT_SSH_ALLOW_FROM"
   say "  check/rotate: proxyctl bot ssh show | proxyctl bot ssh rotate-password --user $BOT_SSH_USER"
+fi
+if [[ "$BOT_HTTP_SETUP" == "yes" ]]; then
+  say "Bot HTTP API credentials:"
+  say "  scheme=http"
+  say "  host=${PUBLIC_HOST:-$(detect_public_host)}"
+  say "  port=$BOT_HTTP_PORT"
+  say "  base_path=$BOT_HTTP_BASE_PATH"
+  say "  username=$BOT_HTTP_USER"
+  say "  password=$BOT_HTTP_PASSWORD"
+  say "  api_key=${BOT_HTTP_API_KEY,,}"
+  say "  allow_from=$BOT_HTTP_ALLOW_FROM"
+  say "  check/rotate: proxyctl bot api show | proxyctl bot api rotate-password | proxyctl bot api rotate-key"
 fi
 if [[ -n "$PUBLIC_HOST" ]]; then
   say "Bootstrap link (iOS paste): https://t.me/proxy?server=${PUBLIC_HOST}&port=${CLIENT_PORT}&secret=${LINK_SECRET}"

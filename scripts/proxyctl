@@ -38,6 +38,9 @@ TOKEN="${MTPROXY_TOKEN:-$ADMIN_TOKEN}"
 BOT_MODE=0
 BOT_SETUP_BIN="${MTPROXY_BOT_SETUP_BIN:-/usr/local/bin/mtproxybot-setup}"
 BOT_CRED_FILE="${MTPROXY_BOT_CRED_FILE:-/etc/mtproxy-fork/bot-access.env}"
+BOT_HTTP_SETUP_BIN="${MTPROXY_BOT_HTTP_SETUP_BIN:-/usr/local/bin/mtproxybot-http-setup}"
+BOT_HTTP_CRED_FILE="${MTPROXY_BOT_HTTP_CRED_FILE:-/etc/mtproxy-fork/bot-http.env}"
+BOT_HTTP_SERVICE="${MTPROXY_BOT_HTTP_SERVICE:-mtproxy-fork-bot-api}"
 LOG_TAG="${MTPROXY_LOG_TAG:-dogctl}"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -118,6 +121,11 @@ Usage:
   proxyctl bot disable <secret>
   proxyctl bot enable <secret>
   proxyctl bot revoke <secret>
+  proxyctl bot api show
+  proxyctl bot api rotate-password [--user <name>] [--allow-from <ip_or_cidr>|--allow-any]
+  proxyctl bot api rotate-key [--user <name>] [--allow-from <ip_or_cidr>|--allow-any]
+  proxyctl bot api set --user <name> [--password <pass>] [--api-key <hex64>] [--base-path </path>] [--listen <addr>] [--port <1..65535>] [--allow-from <ip_or_cidr>|--allow-any]
+  proxyctl bot api status|restart
   proxyctl bot setup-password [--user <name>] [--password <pass>] [--allow-from <ip_or_cidr>]
   proxyctl bot ssh show
   proxyctl bot ssh rotate-password [--user <name>] [--allow-from <ip_or_cidr>|--allow-any]
@@ -306,12 +314,44 @@ load_bot_credentials() {
   printf '%s|%s|%s|%s\n' "$host" "$user" "$pass" "$allow"
 }
 
+load_bot_http_credentials() {
+  local host user pass allow api_key base_path port listen
+  host="${PUBLIC_HOST:-$(detect_public_host)}"
+  user=""
+  pass=""
+  allow=""
+  api_key=""
+  base_path=""
+  port=""
+  listen=""
+  if [[ -r "$BOT_HTTP_CRED_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$BOT_HTTP_CRED_FILE"
+    user="${BOT_HTTP_USER:-}"
+    pass="${BOT_HTTP_PASSWORD:-}"
+    allow="${BOT_HTTP_ALLOW_FROM:-}"
+    api_key="${BOT_HTTP_API_KEY:-}"
+    base_path="${BOT_HTTP_BASE_PATH:-}"
+    port="${BOT_HTTP_PORT:-}"
+    listen="${BOT_HTTP_LISTEN:-}"
+  fi
+  printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$host" "$user" "$pass" "$allow" "$api_key" "$base_path" "$port" "$listen"
+}
+
 bot_setup_exec() {
   require_root
   if [[ ! -x "$BOT_SETUP_BIN" ]]; then
     die "bot setup tool not found: $BOT_SETUP_BIN"
   fi
   "$BOT_SETUP_BIN" "$@"
+}
+
+bot_http_setup_exec() {
+  require_root
+  if [[ ! -x "$BOT_HTTP_SETUP_BIN" ]]; then
+    die "bot http setup tool not found: $BOT_HTTP_SETUP_BIN"
+  fi
+  "$BOT_HTTP_SETUP_BIN" "$@"
 }
 
 service_cmd() {
@@ -343,12 +383,12 @@ service_cmd() {
       ;;
     logs)
       local pat
-      pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|${LOG_TAG}|proxyctl)"
+      pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|mtproxy-fork-bot-api|${LOG_TAG}|proxyctl)"
       journalctl --no-pager -n 800 -o short-iso --no-hostname | grep -E "$pat" | tail -n 120 || true
       ;;
     logs-live|logs-follow)
       local live_pat
-      live_pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|${LOG_TAG}|proxyctl)"
+      live_pat="(${SERVICE_NAME}|mtproto-proxy-fork|mtproxy-fork-expire-sync|mtproxy-fork-bot-api|${LOG_TAG}|proxyctl)"
       journalctl -f -o short-iso --no-hostname | grep --line-buffered -E "$live_pat"
       ;;
     *)
@@ -361,18 +401,21 @@ runtime_update() {
   require_root
   local src="$SOURCE_DIR"
   local ref="${SOURCE_REF:-main}"
-  local jobs unit_file expire_service expire_timer
-  local bin ctl dogctl dogmenu dispatch botsetup runner menu
+  local jobs unit_file expire_service expire_timer bot_http_unit
+  local bin ctl dogctl dogmenu dispatch botsetup bothttpd bothttpsetup runner menu
 
   unit_file="/etc/systemd/system/mtproxy-fork.service"
   expire_service="/etc/systemd/system/mtproxy-fork-expire-sync.service"
   expire_timer="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
+  bot_http_unit="/etc/systemd/system/mtproxy-fork-bot-api.service"
   bin="/usr/local/bin/mtproto-proxy-fork"
   ctl="/usr/local/bin/proxyctl"
   dogctl="/usr/local/bin/dogctl"
   dogmenu="/usr/local/bin/dogmenu"
   dispatch="/usr/local/bin/proxybot-dispatch"
   botsetup="/usr/local/bin/mtproxybot-setup"
+  bothttpd="/usr/local/bin/proxybot-httpd"
+  bothttpsetup="/usr/local/bin/mtproxybot-http-setup"
   runner="/usr/local/bin/mtproxy-fork-run"
   menu="/usr/local/bin/mtproxymenu"
 
@@ -397,12 +440,21 @@ runtime_update() {
   install -m 0755 "$src/scripts/dogmenu" "$dogmenu"
   install -m 0755 "$src/scripts/proxybot-dispatch" "$dispatch"
   install -m 0755 "$src/scripts/mtproxybot-setup" "$botsetup"
+  if [[ -f "$src/scripts/proxybot-httpd" ]]; then
+    install -m 0755 "$src/scripts/proxybot-httpd" "$bothttpd"
+  fi
+  if [[ -f "$src/scripts/mtproxybot-http-setup" ]]; then
+    install -m 0755 "$src/scripts/mtproxybot-http-setup" "$bothttpsetup"
+  fi
   if [[ -f "$src/scripts/mtproxy-fork-run" ]]; then
     install -m 0755 "$src/scripts/mtproxy-fork-run" "$runner"
   fi
   install -m 0644 "$src/systemd/mtproxy-fork.service" "$unit_file"
   install -m 0644 "$src/systemd/mtproxy-fork-expire-sync.service" "$expire_service"
   install -m 0644 "$src/systemd/mtproxy-fork-expire-sync.timer" "$expire_timer"
+  if [[ -f "$src/systemd/mtproxy-fork-bot-api.service" ]]; then
+    install -m 0644 "$src/systemd/mtproxy-fork-bot-api.service" "$bot_http_unit"
+  fi
   cat > "$menu" <<'MENU'
 #!/usr/bin/env bash
 exec /usr/local/bin/dogmenu "$@"
@@ -411,6 +463,10 @@ MENU
 
   systemctl daemon-reload
   systemctl enable --now mtproxy-fork-expire-sync.timer >/dev/null 2>&1 || true
+  if [[ -f "$bot_http_unit" && -r "$BOT_HTTP_CRED_FILE" ]]; then
+    systemctl enable --now "$BOT_HTTP_SERVICE.service" >/dev/null 2>&1 || true
+    systemctl try-restart "$BOT_HTTP_SERVICE.service" >/dev/null 2>&1 || true
+  fi
   systemctl restart "$SERVICE_NAME.service"
   systemctl is-active --quiet "$SERVICE_NAME.service" || die "service failed after update; check journalctl -u $SERVICE_NAME -n 120"
 
@@ -1090,6 +1146,58 @@ cmd_bot_ssh() {
   esac
 }
 
+cmd_bot_api() {
+  local sub="${1:-}"
+  shift || true
+  local resp=""
+  case "$sub" in
+    show)
+      BOT_MODE=0
+      bot_http_setup_exec --show "$@"
+      ;;
+    rotate-password)
+      BOT_MODE=0
+      resp="$(bot_http_setup_exec --regen-password "$@")"
+      echo "$resp"
+      if json_is_ok "$resp"; then
+        audit_log info "bot_api_rotate_password args=$*"
+      else
+        audit_log warn "bot_api_rotate_password_failed args=$* response=$(echo "$resp" | tr -d '\n')"
+      fi
+      ;;
+    rotate-key)
+      BOT_MODE=0
+      resp="$(bot_http_setup_exec --regen-api-key "$@")"
+      echo "$resp"
+      if json_is_ok "$resp"; then
+        audit_log info "bot_api_rotate_key args=$*"
+      else
+        audit_log warn "bot_api_rotate_key_failed args=$* response=$(echo "$resp" | tr -d '\n')"
+      fi
+      ;;
+    set)
+      BOT_MODE=0
+      resp="$(bot_http_setup_exec "$@")"
+      echo "$resp"
+      if json_is_ok "$resp"; then
+        audit_log info "bot_api_set args=$*"
+      else
+        audit_log warn "bot_api_set_failed args=$* response=$(echo "$resp" | tr -d '\n')"
+      fi
+      ;;
+    status)
+      systemctl --no-pager --full status "$BOT_HTTP_SERVICE.service"
+      ;;
+    restart)
+      require_root
+      systemctl restart "$BOT_HTTP_SERVICE.service"
+      ;;
+    *)
+      die "Usage: proxyctl bot api show | rotate-password [opts] | rotate-key [opts] | set <opts> | status | restart"
+      ;;
+  esac
+}
+
 cmd_bot() {
   BOT_MODE=1
   local sub="${1:-}"
@@ -1128,6 +1236,11 @@ cmd_bot() {
       BOT_MODE=0
       shift
       cmd_bot_ssh "$@"
+      ;;
+    api)
+      BOT_MODE=0
+      shift
+      cmd_bot_api "$@"
       ;;
     setup-password)
       BOT_MODE=0
@@ -1252,6 +1365,100 @@ menu_bot_settings() {
   done
 }
 
+menu_bot_http_settings() {
+  while true; do
+    local cred host user pass allow api_key base_path port listen key_short
+    cred="$(load_bot_http_credentials)"
+    IFS='|' read -r host user pass allow api_key base_path port listen <<<"$cred"
+    user="${user:-botapi}"
+    port="${port:-9443}"
+    base_path="${base_path:-/bot}"
+    listen="${listen:-0.0.0.0}"
+    key_short="${api_key:0:12}"
+    echo
+    echo "-------- $(paint "$C_BOLD" "Bulldog Bot HTTP API Settings") --------"
+    run_safe cmd_bot_api show
+    if [[ -z "$pass" ]]; then
+      echo "$(paint "$C_YELLOW" "[NOTE]") saved password is empty/unknown; rotate to issue a new one."
+    fi
+    if [[ -n "$api_key" ]]; then
+      echo "api_key_prefix: ${key_short}..."
+    fi
+    echo "1) Rotate API password"
+    echo "2) Rotate API key"
+    echo "3) Change API user/base-path/port/allow-from"
+    echo "4) Show API service status"
+    echo "5) Restart API service"
+    echo "0) Back"
+    printf "Select: "
+    IFS= read -r bchoice || true
+    case "$bchoice" in
+      1)
+        printf "Username [%s]: " "$user"
+        IFS= read -r auser || true
+        auser="${auser:-$user}"
+        printf "Allow-from (empty=keep, any=clear): "
+        IFS= read -r aallow || true
+        local -a args
+        args=(--user "$auser")
+        if [[ "${aallow,,}" == "any" ]]; then
+          args+=(--allow-any)
+        elif [[ -n "$aallow" ]]; then
+          args+=(--allow-from "$aallow")
+        fi
+        run_safe cmd_bot_api rotate-password "${args[@]}"
+        ;;
+      2)
+        run_safe cmd_bot_api rotate-key
+        ;;
+      3)
+        printf "Username [%s]: " "$user"
+        IFS= read -r nuser || true
+        nuser="${nuser:-$user}"
+        printf "Password (empty=keep current): "
+        IFS= read -r npass || true
+        printf "Port [%s]: " "$port"
+        IFS= read -r nport || true
+        nport="${nport:-$port}"
+        printf "Base path [%s]: " "$base_path"
+        IFS= read -r npath || true
+        npath="${npath:-$base_path}"
+        printf "Listen address [%s]: " "$listen"
+        IFS= read -r nlisten || true
+        nlisten="${nlisten:-$listen}"
+        printf "Allow-from (empty=keep, any=clear): "
+        IFS= read -r nallow || true
+        local -a set_args
+        set_args=(--user "$nuser" --port "$nport" --base-path "$npath" --listen "$nlisten")
+        if [[ -n "$npass" ]]; then
+          set_args+=(--password "$npass")
+        fi
+        if [[ "${nallow,,}" == "any" ]]; then
+          set_args+=(--allow-any)
+        elif [[ -n "$nallow" ]]; then
+          set_args+=(--allow-from "$nallow")
+        fi
+        run_safe cmd_bot_api set "${set_args[@]}"
+        ;;
+      4)
+        run_safe cmd_bot_api status
+        ;;
+      5)
+        run_safe cmd_bot_api restart
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        warn "Unknown option"
+        ;;
+    esac
+    echo
+    printf "Press Enter to continue... "
+    IFS= read -r _ || true
+  done
+}
+
 menu_stealth_settings() {
   while true; do
     local current domain
@@ -1339,6 +1546,7 @@ menu_cmd() {
     echo
     echo "[Bot Integration]"
     echo "19) Bot SSH settings (login/password/allow-from)"
+    echo "20) Bot HTTP API settings (host/base-path/login/password)"
     echo "0) Exit"
     printf "Select: "
     IFS= read -r choice || true
@@ -1421,6 +1629,9 @@ menu_cmd() {
         ;;
       19)
         run_safe menu_bot_settings
+        ;;
+      20)
+        run_safe menu_bot_http_settings
         ;;
       0)
         exit 0
