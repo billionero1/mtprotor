@@ -1412,8 +1412,12 @@ struct domain_info {
   struct in_addr target;
   unsigned char target_ipv6[16];
   short server_hello_encrypted_size;
+  short server_hello_encrypted_size_min;
+  short server_hello_encrypted_size_max;
   char use_random_encrypted_size;
   char is_reversed_extension_order;
+  char extension_order_mode;
+  unsigned char tls_profile;
   struct domain_info *next;
 };
 
@@ -1442,16 +1446,214 @@ static const struct domain_info *get_domain_info (const char *domain, size_t len
   return NULL;
 }
 
+enum {
+  TLS_PROFILE_GENERIC = 0,
+  TLS_PROFILE_MICROSOFT = 1,
+  TLS_PROFILE_GOOGLE = 2,
+  TLS_PROFILE_APPLE = 3,
+  TLS_PROFILE_CLOUDFLARE = 4,
+  TLS_PROFILE_VIDEO = 5
+};
+
+static int clamp_int (int x, int lo, int hi) {
+  if (x < lo) {
+    return lo;
+  }
+  if (x > hi) {
+    return hi;
+  }
+  return x;
+}
+
+static int domain_has_substr (const char *domain, const char *needle) {
+  return domain != NULL && needle != NULL && strstr (domain, needle) != NULL;
+}
+
+static unsigned char detect_tls_profile (const char *domain) {
+  if (domain == NULL) {
+    return TLS_PROFILE_GENERIC;
+  }
+  if (domain_has_substr (domain, "microsoft.") || domain_has_substr (domain, "office.") || domain_has_substr (domain, "live.")) {
+    return TLS_PROFILE_MICROSOFT;
+  }
+  if (domain_has_substr (domain, "google.") || domain_has_substr (domain, "gstatic.") || domain_has_substr (domain, "youtube.")) {
+    return TLS_PROFILE_GOOGLE;
+  }
+  if (domain_has_substr (domain, "apple.") || domain_has_substr (domain, "icloud.") || domain_has_substr (domain, "cdn-apple.")) {
+    return TLS_PROFILE_APPLE;
+  }
+  if (domain_has_substr (domain, "cloudflare.") || domain_has_substr (domain, "cdnjs.") || domain_has_substr (domain, "workers.dev")) {
+    return TLS_PROFILE_CLOUDFLARE;
+  }
+  if (domain_has_substr (domain, "video") || domain_has_substr (domain, "viju.") || domain_has_substr (domain, "netflix.") || domain_has_substr (domain, "hulu.") || domain_has_substr (domain, "disney.")) {
+    return TLS_PROFILE_VIDEO;
+  }
+  return TLS_PROFILE_GENERIC;
+}
+
 static int get_domain_server_hello_encrypted_size (const struct domain_info *info) {
-  if (info->use_random_encrypted_size) {
-    int r = rand();
-    return info->server_hello_encrypted_size + ((r >> 1) & 1) - (r & 1);
-  } else {
-    return info->server_hello_encrypted_size;
+  int base = info->server_hello_encrypted_size;
+  int lo = info->server_hello_encrypted_size_min;
+  int hi = info->server_hello_encrypted_size_max;
+
+  if (lo <= 0 || hi <= 0 || lo > hi) {
+    lo = base - 8;
+    hi = base + 8;
+  }
+
+  if (!info->use_random_encrypted_size) {
+    return clamp_int (base, lo, hi);
+  }
+
+  if (lo == hi) {
+    return lo;
+  }
+
+  {
+    int span = hi - lo;
+    int r = rand() % 100;
+    int result;
+
+    switch (info->tls_profile) {
+      case TLS_PROFILE_MICROSOFT:
+      case TLS_PROFILE_GOOGLE:
+      case TLS_PROFILE_CLOUDFLARE:
+        if (r < 55) {
+          result = base + ((rand() % 5) - 2);
+        } else if (r < 85) {
+          result = lo + span / 2 + ((rand() % 7) - 3);
+        } else {
+          result = lo + (rand() % (span + 1));
+        }
+        break;
+      case TLS_PROFILE_APPLE:
+        if (r < 45) {
+          result = base + ((rand() % 7) - 3);
+        } else if (r < 80) {
+          result = hi - (rand() % (span / 2 + 1));
+        } else {
+          result = lo + (rand() % (span + 1));
+        }
+        break;
+      case TLS_PROFILE_VIDEO:
+        if (r < 35) {
+          result = base + ((rand() % 9) - 4);
+        } else if (r < 75) {
+          result = hi - (rand() % (span / 3 + 1));
+        } else {
+          result = lo + (rand() % (span + 1));
+        }
+        break;
+      default:
+        if (r < 60) {
+          result = base + ((rand() % 9) - 4);
+        } else {
+          result = lo + (rand() % (span + 1));
+        }
+        break;
+    }
+
+    return clamp_int (result, lo, hi);
   }
 }
 
+static int get_domain_server_extension_order (const struct domain_info *info) {
+  if (info->extension_order_mode == 2) {
+    return rand() & 1;
+  }
+  if (info->extension_order_mode == 1) {
+    return 1;
+  }
+  return info->is_reversed_extension_order != 0;
+}
+
 #define TLS_REQUEST_LENGTH 517
+
+static inline void tls_micro_jitter (const struct domain_info *info, int frag_index, int frag_count) {
+  int base_lo = 80;
+  int base_hi = 220;
+  int r = rand() % 100;
+
+  switch (info != NULL ? info->tls_profile : TLS_PROFILE_GENERIC) {
+    case TLS_PROFILE_MICROSOFT:
+    case TLS_PROFILE_GOOGLE:
+    case TLS_PROFILE_CLOUDFLARE:
+      base_lo = 70;
+      base_hi = 180;
+      break;
+    case TLS_PROFILE_APPLE:
+      base_lo = 90;
+      base_hi = 240;
+      break;
+    case TLS_PROFILE_VIDEO:
+      base_lo = 120;
+      base_hi = 320;
+      break;
+    default:
+      base_lo = 80;
+      base_hi = 220;
+      break;
+  }
+
+  if (frag_count > 1 && frag_index < frag_count - 1) {
+    base_hi += 180;
+  }
+
+  if (r < 55) {
+    usleep (base_lo + (rand() % (base_hi - base_lo + 1)));
+  } else if (r < 75) {
+    usleep (base_hi + (rand() % 220));
+  }
+}
+
+static int tls_choose_fragment_size (const struct domain_info *info, int remaining, int frag_index, int frag_count) {
+  if (remaining <= 512) {
+    return remaining;
+  }
+
+  if (frag_index >= frag_count - 1) {
+    return remaining;
+  }
+
+  {
+    int min_chunk = 192;
+    int max_chunk = remaining - (frag_count - frag_index - 1) * 160;
+    int preferred;
+
+    if (max_chunk < min_chunk) {
+      max_chunk = min_chunk;
+    }
+
+    switch (info != NULL ? info->tls_profile : TLS_PROFILE_GENERIC) {
+      case TLS_PROFILE_MICROSOFT:
+        preferred = 520 + (rand() % 420);
+        break;
+      case TLS_PROFILE_GOOGLE:
+        preferred = 640 + (rand() % 480);
+        break;
+      case TLS_PROFILE_APPLE:
+        preferred = 420 + (rand() % 360);
+        break;
+      case TLS_PROFILE_CLOUDFLARE:
+        preferred = 700 + (rand() % 520);
+        break;
+      case TLS_PROFILE_VIDEO:
+        preferred = 880 + (rand() % 700);
+        break;
+      default:
+        preferred = 480 + (rand() % 520);
+        break;
+    }
+
+    preferred = clamp_int (preferred, min_chunk, max_chunk);
+
+    if (remaining - preferred < 160) {
+      preferred = remaining - 160;
+    }
+
+    return clamp_int (preferred, min_chunk, max_chunk);
+  }
+}
 
 static BIGNUM *get_y2 (BIGNUM *x, const BIGNUM *mod, BN_CTX *big_num_context) {
   // returns y^2 = x^3 + 486662 * x^2 + x
@@ -1963,15 +2165,22 @@ static int update_domain_info (struct domain_info *info) {
 
   if (is_reversed_extension_order_min != is_reversed_extension_order_max) {
     kprintf ("Upstream server %s uses non-deterministic extension order\n", domain);
+    info->extension_order_mode = 2;
+    info->is_reversed_extension_order = 0;
+  } else {
+    info->is_reversed_extension_order = (char)is_reversed_extension_order_min;
+    info->extension_order_mode = info->is_reversed_extension_order ? 1 : 0;
   }
 
-  info->is_reversed_extension_order = (char)is_reversed_extension_order_min;
+  info->tls_profile = detect_tls_profile (domain);
+  info->server_hello_encrypted_size_min = encrypted_application_data_length_min;
+  info->server_hello_encrypted_size_max = encrypted_application_data_length_max;
 
   if (encrypted_application_data_length_min == encrypted_application_data_length_max) {
     info->server_hello_encrypted_size = encrypted_application_data_length_min;
     info->use_random_encrypted_size = 0;
   } else if (encrypted_application_data_length_max - encrypted_application_data_length_min <= 3) {
-    info->server_hello_encrypted_size = encrypted_application_data_length_max - 1;
+    info->server_hello_encrypted_size = (encrypted_application_data_length_min + encrypted_application_data_length_max) / 2;
     info->use_random_encrypted_size = 1;
   } else {
     kprintf ("Unrecognized encrypted application data length pattern with min = %d, max = %d, mean = %.3lf\n",
@@ -1980,11 +2189,14 @@ static int update_domain_info (struct domain_info *info) {
     info->use_random_encrypted_size = 1;
   }
 
-  vkprintf (0, "Successfully checked domain %s in %.3lf seconds: is_reversed_extension_order = %d, server_hello_encrypted_size = %d, use_random_encrypted_size = %d\n",
-            domain, get_utime_monotonic() - (finish_time - 5.0), info->is_reversed_extension_order, info->server_hello_encrypted_size, info->use_random_encrypted_size);
-  if (info->is_reversed_extension_order && info->server_hello_encrypted_size <= 1250) {
-    kprintf ("Multiple encrypted client data packets are unsupported, so handshake with %s will not be fully emulated\n", domain);
-  }
+  info->server_hello_encrypted_size = clamp_int (info->server_hello_encrypted_size,
+                                                 info->server_hello_encrypted_size_min,
+                                                 info->server_hello_encrypted_size_max);
+
+  vkprintf (0, "Successfully checked domain %s in %.3lf seconds: extension_order_mode = %d, is_reversed_extension_order = %d, server_hello_encrypted_size = %d, min = %d, max = %d, use_random_encrypted_size = %d, tls_profile = %d\n",
+            domain, get_utime_monotonic() - (finish_time - 5.0), info->extension_order_mode, info->is_reversed_extension_order,
+            info->server_hello_encrypted_size, info->server_hello_encrypted_size_min, info->server_hello_encrypted_size_max,
+            info->use_random_encrypted_size, info->tls_profile);
   return 1;
 #undef TRIES
 }
@@ -2066,8 +2278,12 @@ void tcp_rpc_init_proxy_domains() {
         kprintf ("Failed to update response data about %s, so default response settings wiil be used\n", info->domain);
         // keep target addresses as is
         info->is_reversed_extension_order = 0;
+        info->extension_order_mode = 0;
         info->use_random_encrypted_size = 1;
+        info->tls_profile = detect_tls_profile (info->domain);
         info->server_hello_encrypted_size = 2500 + rand() % 1120;
+        info->server_hello_encrypted_size_min = info->server_hello_encrypted_size - 24;
+        info->server_hello_encrypted_size_max = info->server_hello_encrypted_size + 24;
       }
 
       info = info->next;
@@ -2246,6 +2462,63 @@ int tcp_rpcs_ext_init_accepted (connection_job_t C) {
   return tcp_rpcs_init_accepted_nohs (C);
 }
 
+static int tls_fetch_client_encrypted_header (connection_job_t C) {
+  struct connection_info *c = CONN_INFO (C);
+
+  while (c->tls_initial_header_bytes < 64) {
+    if (c->left_tls_packet_length == 0) {
+      if (c->in.total_bytes < 5) {
+        vkprintf (2, "Need %d more bytes to parse TLS header\n", 5 - c->in.total_bytes);
+        return 5 - c->in.total_bytes;
+      }
+
+      unsigned char header[5];
+      assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
+      if (memcmp (header, "\x17\x03\x03", 3) != 0) {
+        vkprintf (1, "error while parsing packet: expect TLS header\n");
+        fail_connection (C, -1);
+        return 0;
+      }
+
+      c->left_tls_packet_length = 256 * header[3] + header[4];
+      vkprintf (2, "Receive TLS-packet of length %d\n", c->left_tls_packet_length);
+      assert (rwm_skip_data (&c->in, 5) == 5);
+    }
+
+    if (c->left_tls_packet_length < 0) {
+      vkprintf (1, "error while parsing packet: invalid TLS packet length %d\n", c->left_tls_packet_length);
+      fail_connection (C, -1);
+      return 0;
+    }
+
+    if (c->in.total_bytes <= 0) {
+      return 64 - c->tls_initial_header_bytes;
+    }
+
+    int take = c->left_tls_packet_length;
+    int need = 64 - c->tls_initial_header_bytes;
+    if (take > need) {
+      take = need;
+    }
+    if (take > c->in.total_bytes) {
+      take = c->in.total_bytes;
+    }
+
+    if (take <= 0) {
+      vkprintf (1, "error while parsing packet: empty TLS packet\n");
+      fail_connection (C, -1);
+      return 0;
+    }
+
+    assert (rwm_fetch_lookup (&c->in, c->tls_initial_header + c->tls_initial_header_bytes, take) == take);
+    assert (rwm_skip_data (&c->in, take) == take);
+    c->left_tls_packet_length -= take;
+    c->tls_initial_header_bytes += take;
+  }
+
+  return 64;
+}
+
 int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 #define RETURN_TLS_ERROR(info) \
   return proxy_connection (C, info);  
@@ -2321,40 +2594,31 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
       // fake tls
       if (c->flags & C_IS_TLS) {
-        if (len < 11) {
-          return 11 - len;
+        if (c->left_tls_packet_length == -1) {
+          if (len < 11) {
+            return 11 - len;
+          }
+
+          vkprintf (1, "Established TLS connection from %s:%d\n", show_remote_ip (C), c->remote_port);
+          unsigned char header[11];
+          assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
+          if (memcmp (header, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9) != 0) {
+            vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
+            fail_connection (C, -1);
+            return 0;
+          }
+
+          assert (rwm_skip_data (&c->in, 11) == 11);
+          c->left_tls_packet_length = 0;
+          c->tls_initial_header_bytes = 0;
         }
 
-        vkprintf (1, "Established TLS connection from %s:%d\n", show_remote_ip (C), c->remote_port);
-        unsigned char header[11];
-        assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
-        if (memcmp (header, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9) != 0) {
-          vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
-          fail_connection (C, -1);
-          return 0;
+        int header_bytes = tls_fetch_client_encrypted_header (C);
+        if (header_bytes != 64) {
+          return header_bytes;
         }
 
-        min_len = 11 + 256 * header[9] + header[10];
-        if (len < min_len) {
-          vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
-          return min_len - len;
-        }
-
-        assert (rwm_skip_data (&c->in, 11) == 11);
-        len -= 11;
-        c->left_tls_packet_length = 256 * header[9] + header[10]; // store left length of current TLS packet in extra_int3
-        vkprintf (2, "Receive first TLS packet of length %d\n", c->left_tls_packet_length);
-
-        if (c->left_tls_packet_length < 64) {
-          vkprintf (1, "error while parsing packet: too short first TLS packet: %d\n", c->left_tls_packet_length);
-          fail_connection (C, -1);
-          return 0;
-        }
-        // now len >= c->left_tls_packet_length >= 64
-
-        assert (rwm_fetch_lookup (&c->in, &packet_len, 4) == 4);
-
-        c->left_tls_packet_length -= 64; // skip header length
+        len = c->in.total_bytes;
       } else if ((packet_len & 0xFFFFFF) == 0x010316 && (packet_len >> 24) >= 2 && tcp_rpcs_active_secret_count (ext_now_sec()) > 0 && allow_only_tls) {
         unsigned char header[5];
         assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
@@ -2449,9 +2713,52 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         assert (rwm_skip_data (&c->in, len) == len);
         c->flags |= C_IS_TLS;
         c->left_tls_packet_length = -1;
+        c->tls_initial_header_bytes = 0;
 
         int encrypted_size = get_domain_server_hello_encrypted_size (info);
-        int response_size = 127 + 6 + 5 + encrypted_size;
+
+        int frag_count = 1;
+        int frag_sizes[3];
+        memset (frag_sizes, 0, sizeof (frag_sizes));
+
+        if (encrypted_size > 768) {
+          int r = rand() % 100;
+          switch (info->tls_profile) {
+            case TLS_PROFILE_MICROSOFT:
+            case TLS_PROFILE_GOOGLE:
+            case TLS_PROFILE_CLOUDFLARE:
+              frag_count = (r < 55) ? 2 : ((r < 72) ? 3 : 1);
+              break;
+            case TLS_PROFILE_APPLE:
+              frag_count = (r < 45) ? 2 : ((r < 58) ? 3 : 1);
+              break;
+            case TLS_PROFILE_VIDEO:
+              frag_count = (r < 35) ? 2 : ((r < 60) ? 3 : 1);
+              break;
+            default:
+              frag_count = (r < 50) ? 2 : ((r < 65) ? 3 : 1);
+              break;
+          }
+        }
+
+        int remaining = encrypted_size;
+        int j;
+        for (j = 0; j < frag_count - 1; j++) {
+          int chunk = tls_choose_fragment_size (info, remaining, j, frag_count);
+          if (chunk <= 0 || chunk >= remaining) {
+            frag_count = j + 1;
+            break;
+          }
+          frag_sizes[j] = chunk;
+          remaining -= chunk;
+        }
+        frag_sizes[frag_count - 1] = remaining;
+
+        int response_size = 127 + 6;
+        for (j = 0; j < frag_count; j++) {
+          response_size += 5 + frag_sizes[j];
+        }
+
         unsigned char *buffer = malloc (32 + response_size);
         assert (buffer != NULL);
         memcpy (buffer, client_random, 32);
@@ -2465,7 +2772,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
         pos = 81;
         int tls_server_extensions[3] = {0x33, 0x2b, -1};
-        if (info->is_reversed_extension_order) {
+        if (get_domain_server_extension_order (info)) {
           int t = tls_server_extensions[0];
           tls_server_extensions[0] = tls_server_extensions[1];
           tls_server_extensions[1] = t;
@@ -2478,7 +2785,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             generate_public_key (response_buffer + pos + 8);
             pos += 40;
           } else if (tls_server_extensions[i] == 0x2b) {
-            assert (pos + 5 <= response_size);
+            assert (pos + 6 <= response_size);
             memcpy (response_buffer + pos, "\x00\x2b\x00\x02\x03\x04", 6);
             pos += 6;
           } else {
@@ -2486,12 +2793,28 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           }
         }
         assert (pos == 127);
-        memcpy (response_buffer + 127, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9);
-        pos += 9;
-        response_buffer[pos++] = encrypted_size / 256;
-        response_buffer[pos++] = encrypted_size % 256;
-        assert (pos + encrypted_size == response_size);
-        RAND_bytes (response_buffer + pos, encrypted_size);
+
+        memcpy (response_buffer + pos, "\x14\x03\x03\x00\x01\x01", 6);
+        pos += 6;
+
+        for (j = 0; j < frag_count; j++) {
+          int chunk = frag_sizes[j];
+          assert (chunk > 0);
+
+          tls_micro_jitter (info, j, frag_count);
+
+          memcpy (response_buffer + pos, "\x17\x03\x03", 3);
+          pos += 3;
+
+          response_buffer[pos++] = chunk / 256;
+          response_buffer[pos++] = chunk % 256;
+
+          assert (pos + chunk <= response_size);
+          RAND_bytes (response_buffer + pos, chunk);
+          pos += chunk;
+        }
+
+        assert (pos == response_size);
 
         unsigned char server_random[32];
         sha256_hmac (matched_secret, 16, buffer, 32 + response_size, server_random);
@@ -2521,8 +2844,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
       }
 #endif
 
-      if (len < 64) {
-        assert (!(c->flags & C_IS_TLS));
+      if (!(c->flags & C_IS_TLS) && len < 64) {
 #if __ALLOW_UNOBFS__
         vkprintf (1, "random 64-byte header: first 0x%08x 0x%08x, need %d more bytes to distinguish\n", tmp[0], tmp[1], 64 - len);
 #else
@@ -2533,7 +2855,11 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
       unsigned char random_header[64];
       unsigned char k[48];
-      assert (rwm_fetch_lookup (&c->in, random_header, 64) == 64);
+      if ((c->flags & C_IS_TLS) && c->tls_initial_header_bytes == 64) {
+        memcpy (random_header, c->tls_initial_header, 64);
+      } else {
+        assert (rwm_fetch_lookup (&c->in, random_header, 64) == 64);
+      }
         
       unsigned char random_header_sav[64];
       memcpy (random_header_sav, random_header, 64);
@@ -2586,7 +2912,11 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             vkprintf (1, "Expected random padding mode\n");
             RETURN_TLS_ERROR(default_domain_info);
           }
-          assert (rwm_skip_data (&c->in, 64) == 64);
+          if ((c->flags & C_IS_TLS) && c->tls_initial_header_bytes == 64) {
+            c->tls_initial_header_bytes = 0;
+          } else {
+            assert (rwm_skip_data (&c->in, 64) == 64);
+          }
           rwm_union (&c->in_u, &c->in);
           rwm_init (&c->in, 0);
           // T->read_pos = 64;

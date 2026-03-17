@@ -252,6 +252,8 @@ struct connection_info {
   int listening, listening_generation;
   int window_clamp;
   int left_tls_packet_length;
+  int tls_initial_header_bytes;
+  unsigned char tls_initial_header[64];
 
   struct raw_message in_u, in, out, out_p;
 
