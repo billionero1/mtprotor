@@ -1414,7 +1414,6 @@ struct domain_info {
   short server_hello_encrypted_size;
   char use_random_encrypted_size;
   char is_reversed_extension_order;
-  char extension_order_mode;
   struct domain_info *next;
 };
 
@@ -1450,16 +1449,6 @@ static int get_domain_server_hello_encrypted_size (const struct domain_info *inf
   } else {
     return info->server_hello_encrypted_size;
   }
-}
-
-static int get_domain_server_extension_order (const struct domain_info *info) {
-  if (info->extension_order_mode == 2) {
-    return rand() & 1;
-  }
-  if (info->extension_order_mode == 1) {
-    return 1;
-  }
-  return info->is_reversed_extension_order != 0;
 }
 
 #define TLS_REQUEST_LENGTH 517
@@ -1974,12 +1963,9 @@ static int update_domain_info (struct domain_info *info) {
 
   if (is_reversed_extension_order_min != is_reversed_extension_order_max) {
     kprintf ("Upstream server %s uses non-deterministic extension order\n", domain);
-    info->extension_order_mode = 2;
-    info->is_reversed_extension_order = 0;
-  } else {
-    info->is_reversed_extension_order = (char)is_reversed_extension_order_min;
-    info->extension_order_mode = info->is_reversed_extension_order ? 1 : 0;
   }
+
+  info->is_reversed_extension_order = (char)is_reversed_extension_order_min;
 
   if (encrypted_application_data_length_min == encrypted_application_data_length_max) {
     info->server_hello_encrypted_size = encrypted_application_data_length_min;
@@ -1994,8 +1980,11 @@ static int update_domain_info (struct domain_info *info) {
     info->use_random_encrypted_size = 1;
   }
 
-  vkprintf (0, "Successfully checked domain %s in %.3lf seconds: extension_order_mode = %d, is_reversed_extension_order = %d, server_hello_encrypted_size = %d, use_random_encrypted_size = %d\n",
-            domain, get_utime_monotonic() - (finish_time - 5.0), info->extension_order_mode, info->is_reversed_extension_order, info->server_hello_encrypted_size, info->use_random_encrypted_size);
+  vkprintf (0, "Successfully checked domain %s in %.3lf seconds: is_reversed_extension_order = %d, server_hello_encrypted_size = %d, use_random_encrypted_size = %d\n",
+            domain, get_utime_monotonic() - (finish_time - 5.0), info->is_reversed_extension_order, info->server_hello_encrypted_size, info->use_random_encrypted_size);
+  if (info->is_reversed_extension_order && info->server_hello_encrypted_size <= 1250) {
+    kprintf ("Multiple encrypted client data packets are unsupported, so handshake with %s will not be fully emulated\n", domain);
+  }
   return 1;
 #undef TRIES
 }
@@ -2077,7 +2066,6 @@ void tcp_rpc_init_proxy_domains() {
         kprintf ("Failed to update response data about %s, so default response settings wiil be used\n", info->domain);
         // keep target addresses as is
         info->is_reversed_extension_order = 0;
-        info->extension_order_mode = 0;
         info->use_random_encrypted_size = 1;
         info->server_hello_encrypted_size = 2500 + rand() % 1120;
       }
@@ -2277,14 +2265,7 @@ static int tls_fetch_client_encrypted_header (connection_job_t C) {
       }
 
       c->left_tls_packet_length = 256 * header[3] + header[4];
-      vkprintf (2, "Receive TLS-packet of length %d\n", c->left_tls_packet_length);
       assert (rwm_skip_data (&c->in, 5) == 5);
-    }
-
-    if (c->left_tls_packet_length < 0) {
-      vkprintf (1, "error while parsing packet: invalid TLS packet length %d\n", c->left_tls_packet_length);
-      fail_connection (C, -1);
-      return 0;
     }
 
     if (c->in.total_bytes <= 0) {
@@ -2293,21 +2274,16 @@ static int tls_fetch_client_encrypted_header (connection_job_t C) {
 
     int take = c->left_tls_packet_length;
     int need = 64 - c->tls_initial_header_bytes;
-    if (take > need) {
-      take = need;
-    }
-    if (take > c->in.total_bytes) {
-      take = c->in.total_bytes;
-    }
 
-    if (take <= 0) {
-      vkprintf (1, "error while parsing packet: empty TLS packet\n");
-      fail_connection (C, -1);
-      return 0;
-    }
+    if (take > need) take = need;
+    if (take > c->in.total_bytes) take = c->in.total_bytes;
 
-    assert (rwm_fetch_lookup (&c->in, c->tls_initial_header + c->tls_initial_header_bytes, take) == take);
+    assert (rwm_fetch_lookup (&c->in,
+      c->tls_initial_header + c->tls_initial_header_bytes,
+      take) == take);
+
     assert (rwm_skip_data (&c->in, take) == take);
+
     c->left_tls_packet_length -= take;
     c->tls_initial_header_bytes += take;
   }
@@ -2526,7 +2502,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
         pos = 81;
         int tls_server_extensions[3] = {0x33, 0x2b, -1};
-        if (get_domain_server_extension_order (info)) {
+        if (info->is_reversed_extension_order) {
           int t = tls_server_extensions[0];
           tls_server_extensions[0] = tls_server_extensions[1];
           tls_server_extensions[1] = t;
