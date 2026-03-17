@@ -2246,51 +2246,6 @@ int tcp_rpcs_ext_init_accepted (connection_job_t C) {
   return tcp_rpcs_init_accepted_nohs (C);
 }
 
-static int tls_fetch_client_encrypted_header (connection_job_t C) {
-  struct connection_info *c = CONN_INFO (C);
-
-  while (c->tls_initial_header_bytes < 64) {
-    if (c->left_tls_packet_length == 0) {
-      if (c->in.total_bytes < 5) {
-        vkprintf (2, "Need %d more bytes to parse TLS header\n", 5 - c->in.total_bytes);
-        return 5 - c->in.total_bytes;
-      }
-
-      unsigned char header[5];
-      assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
-      if (memcmp (header, "\x17\x03\x03", 3) != 0) {
-        vkprintf (1, "error while parsing packet: expect TLS header\n");
-        fail_connection (C, -1);
-        return 0;
-      }
-
-      c->left_tls_packet_length = 256 * header[3] + header[4];
-      assert (rwm_skip_data (&c->in, 5) == 5);
-    }
-
-    if (c->in.total_bytes <= 0) {
-      return 64 - c->tls_initial_header_bytes;
-    }
-
-    int take = c->left_tls_packet_length;
-    int need = 64 - c->tls_initial_header_bytes;
-
-    if (take > need) take = need;
-    if (take > c->in.total_bytes) take = c->in.total_bytes;
-
-    assert (rwm_fetch_lookup (&c->in,
-      c->tls_initial_header + c->tls_initial_header_bytes,
-      take) == take);
-
-    assert (rwm_skip_data (&c->in, take) == take);
-
-    c->left_tls_packet_length -= take;
-    c->tls_initial_header_bytes += take;
-  }
-
-  return 64;
-}
-
 int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 #define RETURN_TLS_ERROR(info) \
   return proxy_connection (C, info);  
@@ -2366,31 +2321,40 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
       // fake tls
       if (c->flags & C_IS_TLS) {
-        if (c->left_tls_packet_length == -1) {
-          if (len < 11) {
-            return 11 - len;
-          }
-
-          vkprintf (1, "Established TLS connection from %s:%d\n", show_remote_ip (C), c->remote_port);
-          unsigned char header[11];
-          assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
-          if (memcmp (header, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9) != 0) {
-            vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
-            fail_connection (C, -1);
-            return 0;
-          }
-
-          assert (rwm_skip_data (&c->in, 11) == 11);
-          c->left_tls_packet_length = 0;
-          c->tls_initial_header_bytes = 0;
+        if (len < 11) {
+          return 11 - len;
         }
 
-        int header_bytes = tls_fetch_client_encrypted_header (C);
-        if (header_bytes != 64) {
-          return header_bytes;
+        vkprintf (1, "Established TLS connection from %s:%d\n", show_remote_ip (C), c->remote_port);
+        unsigned char header[11];
+        assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
+        if (memcmp (header, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9) != 0) {
+          vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
+          fail_connection (C, -1);
+          return 0;
         }
 
-        len = c->in.total_bytes;
+        min_len = 11 + 256 * header[9] + header[10];
+        if (len < min_len) {
+          vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
+          return min_len - len;
+        }
+
+        assert (rwm_skip_data (&c->in, 11) == 11);
+        len -= 11;
+        c->left_tls_packet_length = 256 * header[9] + header[10]; // store left length of current TLS packet in extra_int3
+        vkprintf (2, "Receive first TLS packet of length %d\n", c->left_tls_packet_length);
+
+        if (c->left_tls_packet_length < 64) {
+          vkprintf (1, "error while parsing packet: too short first TLS packet: %d\n", c->left_tls_packet_length);
+          fail_connection (C, -1);
+          return 0;
+        }
+        // now len >= c->left_tls_packet_length >= 64
+
+        assert (rwm_fetch_lookup (&c->in, &packet_len, 4) == 4);
+
+        c->left_tls_packet_length -= 64; // skip header length
       } else if ((packet_len & 0xFFFFFF) == 0x010316 && (packet_len >> 24) >= 2 && tcp_rpcs_active_secret_count (ext_now_sec()) > 0 && allow_only_tls) {
         unsigned char header[5];
         assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
@@ -2485,7 +2449,6 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         assert (rwm_skip_data (&c->in, len) == len);
         c->flags |= C_IS_TLS;
         c->left_tls_packet_length = -1;
-        c->tls_initial_header_bytes = 0;
 
         int encrypted_size = get_domain_server_hello_encrypted_size (info);
         int response_size = 127 + 6 + 5 + encrypted_size;
@@ -2558,7 +2521,8 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
       }
 #endif
 
-      if (!(c->flags & C_IS_TLS) && len < 64) {
+      if (len < 64) {
+        assert (!(c->flags & C_IS_TLS));
 #if __ALLOW_UNOBFS__
         vkprintf (1, "random 64-byte header: first 0x%08x 0x%08x, need %d more bytes to distinguish\n", tmp[0], tmp[1], 64 - len);
 #else
@@ -2569,11 +2533,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
       unsigned char random_header[64];
       unsigned char k[48];
-      if ((c->flags & C_IS_TLS) && c->tls_initial_header_bytes == 64) {
-        memcpy (random_header, c->tls_initial_header, 64);
-      } else {
-        assert (rwm_fetch_lookup (&c->in, random_header, 64) == 64);
-      }
+      assert (rwm_fetch_lookup (&c->in, random_header, 64) == 64);
         
       unsigned char random_header_sav[64];
       memcpy (random_header_sav, random_header, 64);
@@ -2626,11 +2586,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             vkprintf (1, "Expected random padding mode\n");
             RETURN_TLS_ERROR(default_domain_info);
           }
-          if ((c->flags & C_IS_TLS) && c->tls_initial_header_bytes == 64) {
-            c->tls_initial_header_bytes = 0;
-          } else {
-            assert (rwm_skip_data (&c->in, 64) == 64);
-          }
+          assert (rwm_skip_data (&c->in, 64) == 64);
           rwm_union (&c->in_u, &c->in);
           rwm_init (&c->in, 0);
           // T->read_pos = 64;
