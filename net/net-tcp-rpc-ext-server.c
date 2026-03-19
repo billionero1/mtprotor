@@ -131,6 +131,10 @@ int tcp_proxy_pass_parse_execute (connection_job_t C) {
   struct raw_message *r = malloc (sizeof (*r));
   rwm_move (r, &c->in);
   rwm_init (&c->in, 0);
+  if (r->total_bytes > 0) {
+    // Count downstream traffic attributed to the matched client secret.
+    tcp_rpcs_note_connection_traffic (E, 0, r->total_bytes);
+  }
   vkprintf (3, "proxying %d bytes to %s:%d\n", r->total_bytes, show_remote_ip (E), e->remote_port);
   mpq_push_w (e->out_queue, PTR_MOVE(r), 0);
   job_signal (JOB_REF_PASS (E), JS_RUN);
@@ -643,10 +647,6 @@ int tcp_rpcs_load_secrets_state (void) {
   char *line = NULL;
   size_t cap = 0;
   ssize_t n;
-  int have_totals = 0;
-  long long loaded_total_in = 0;
-  long long loaded_total_out = 0;
-  long long loaded_total_conn = 0;
 
   while ((n = getline (&line, &cap, f)) >= 0) {
     if (n <= 1 || line[0] == '#') {
@@ -659,12 +659,9 @@ int tcp_rpcs_load_secrets_state (void) {
       char *total_out_s = strtok_r (NULL, "\t\r\n", &saveptr);
       char *total_conn_s = strtok_r (NULL, "\t\r\n", &saveptr);
       char *next_id_s = strtok_r (NULL, "\t\r\n", &saveptr);
-      if (total_in_s && total_out_s && total_conn_s) {
-        loaded_total_in = atoll (total_in_s);
-        loaded_total_out = atoll (total_out_s);
-        loaded_total_conn = atoll (total_conn_s);
-        have_totals = 1;
-      }
+      (void) total_in_s;
+      (void) total_out_s;
+      (void) total_conn_s;
       if (next_id_s) {
         int parsed_next = atoi (next_id_s);
         if (parsed_next > ext_secret_next_id) {
@@ -805,28 +802,22 @@ int tcp_rpcs_load_secrets_state (void) {
   free (line);
   fclose (f);
 
-  if (have_totals) {
-    ext_total_bytes_in = loaded_total_in;
-    ext_total_bytes_out = loaded_total_out;
-    ext_total_connections = loaded_total_conn;
-  } else {
-    long long sum_in = 0;
-    long long sum_out = 0;
-    long long sum_conn = 0;
-    int i;
-    for (i = 0; i < ext_secret_cnt; i++) {
-      int id = ext_secrets[i].id;
-      if (id <= 0 || id >= ext_secret_metrics_cap) {
-        continue;
-      }
-      sum_in += ext_secret_metrics[id].bytes_in;
-      sum_out += ext_secret_metrics[id].bytes_out;
-      sum_conn += ext_secret_metrics[id].connections;
+  long long sum_in = 0;
+  long long sum_out = 0;
+  long long sum_conn = 0;
+  int i;
+  for (i = 0; i < ext_secret_cnt; i++) {
+    int id = ext_secrets[i].id;
+    if (id <= 0 || id >= ext_secret_metrics_cap) {
+      continue;
     }
-    ext_total_bytes_in = sum_in;
-    ext_total_bytes_out = sum_out;
-    ext_total_connections = sum_conn;
+    sum_in += ext_secret_metrics[id].bytes_in;
+    sum_out += ext_secret_metrics[id].bytes_out;
+    sum_conn += ext_secret_metrics[id].connections;
   }
+  ext_total_bytes_in = sum_in;
+  ext_total_bytes_out = sum_out;
+  ext_total_connections = sum_conn;
 
   if (ext_secret_next_id < 1) {
     ext_secret_next_id = 1;
