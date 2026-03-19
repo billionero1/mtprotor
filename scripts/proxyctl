@@ -305,6 +305,40 @@ secret_row_field() {
     connections)
       echo "$row" | sed -n 's/.*"connections":\([0-9][0-9]*\).*/\1/p'
       ;;
+    last_seen)
+      echo "$row" | sed -n 's/.*"last_seen":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    last_ip)
+      echo "$row" | sed -n 's/.*"last_ip":"\([^"]*\)".*/\1/p'
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+stats_json_field() {
+  local json="${1:-}"
+  local key="${2:-}"
+  case "$key" in
+    secrets_total)
+      echo "$json" | sed -n 's/.*"secrets":{"total":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    secrets_active)
+      echo "$json" | sed -n 's/.*"secrets":{"total":[0-9][0-9]*,"active":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    bytes_in)
+      echo "$json" | sed -n 's/.*"totals":{"bytes_in":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    bytes_out)
+      echo "$json" | sed -n 's/.*"totals":{"bytes_in":[0-9][0-9]*,"bytes_out":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    bytes_total)
+      echo "$json" | sed -n 's/.*"totals":{"bytes_in":[0-9][0-9]*,"bytes_out":[0-9][0-9]*,"bytes_total":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    connections)
+      echo "$json" | sed -n 's/.*"totals":{"bytes_in":[0-9][0-9]*,"bytes_out":[0-9][0-9]*,"bytes_total":[0-9][0-9]*,"connections":\([0-9][0-9]*\).*/\1/p'
+      ;;
     *)
       echo ""
       ;;
@@ -905,13 +939,30 @@ cmd_config_set() {
 }
 
 cmd_secret_list_table() {
-  local json now
+  local json stats now
+  local total_cnt active_cnt total_in total_out total_bytes total_conn
   ensure_socket
   json="$(request GET /v1/secrets)"
+  stats="$(request GET /v1/stats 2>/dev/null || true)"
   now="$(date +%s)"
 
-  printf '%-10s %-8s %-8s %-20s %-10s %-10s %-10s %-6s %-32s %s\n' \
-    "STATUS" "ENABLED" "ACTIVE" "ACTIVE_UNTIL(UTC)" "IN" "OUT" "TOTAL" "CONN" "SECRET" "LABEL"
+  total_cnt="$(stats_json_field "$stats" secrets_total)"
+  active_cnt="$(stats_json_field "$stats" secrets_active)"
+  total_in="$(stats_json_field "$stats" bytes_in)"
+  total_out="$(stats_json_field "$stats" bytes_out)"
+  total_bytes="$(stats_json_field "$stats" bytes_total)"
+  total_conn="$(stats_json_field "$stats" connections)"
+  [[ -n "$total_cnt" ]] || total_cnt=0
+  [[ -n "$active_cnt" ]] || active_cnt=0
+  [[ -n "$total_in" ]] || total_in=0
+  [[ -n "$total_out" ]] || total_out=0
+  [[ -n "$total_bytes" ]] || total_bytes=$(( total_in + total_out ))
+  [[ -n "$total_conn" ]] || total_conn=0
+
+  printf 'TOTALS     users=%s active=%s in=%s out=%s total=%s conn=%s\n' \
+    "$total_cnt" "$active_cnt" "$(fmt_bytes "$total_in")" "$(fmt_bytes "$total_out")" "$(fmt_bytes "$total_bytes")" "$total_conn"
+  printf '%-10s %-8s %-8s %-20s %-10s %-10s %-10s %-6s %-32s %-14s %s\n' \
+    "STATUS" "ENABLED" "ACTIVE" "ACTIVE_UNTIL(UTC)" "IN" "OUT" "TOTAL" "CONN" "SECRET" "LABEL" "LAST_IP"
 
   local rows row
   rows="$(secrets_json_rows "$json")"
@@ -921,7 +972,7 @@ cmd_secret_list_table() {
 
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
-    local secret enabled active expires label until status color bytes_in bytes_out bytes_total connections
+    local secret enabled active expires label until status color bytes_in bytes_out bytes_total connections last_ip
     secret="$(secret_row_field "$row" secret)"
     enabled="$(secret_row_field "$row" enabled)"
     active="$(secret_row_field "$row" active)"
@@ -931,10 +982,12 @@ cmd_secret_list_table() {
     bytes_out="$(secret_row_field "$row" bytes_out)"
     bytes_total="$(secret_row_field "$row" bytes_total)"
     connections="$(secret_row_field "$row" connections)"
+    last_ip="$(secret_row_field "$row" last_ip)"
     [[ -n "$bytes_in" ]] || bytes_in=0
     [[ -n "$bytes_out" ]] || bytes_out=0
     [[ -n "$bytes_total" ]] || bytes_total=$(( bytes_in + bytes_out ))
     [[ -n "$connections" ]] || connections=0
+    [[ -n "$last_ip" ]] || last_ip="-"
     until="$(iso_utc_from_unix "$expires")"
     status="INACTIVE"
     color="$C_YELLOW"
@@ -948,10 +1001,10 @@ cmd_secret_list_table() {
       status="EXPIRED"
       color="$C_YELLOW"
     fi
-    printf '%-10s %-8s %-8s %-20s %-10s %-10s %-10s %-6s %-32s %s\n' \
+    printf '%-10s %-8s %-8s %-20s %-10s %-10s %-10s %-6s %-32s %-14s %s\n' \
       "$(paint "$color" "$status")" "$enabled" "$active" "$until" \
       "$(fmt_bytes "$bytes_in")" "$(fmt_bytes "$bytes_out")" "$(fmt_bytes "$bytes_total")" "$connections" \
-      "$secret" "$label"
+      "$secret" "$label" "$last_ip"
   done <<<"$rows"
 }
 
@@ -963,12 +1016,12 @@ cmd_secret_stats() {
   rows="$(secrets_json_rows "$json")"
   found=0
 
-  printf '%-32s %-18s %-8s %-8s %-10s %-10s %-10s %-8s %-20s\n' \
-    "SECRET" "LABEL" "ENABLED" "ACTIVE" "IN" "OUT" "TOTAL" "CONN" "ACTIVE_UNTIL(UTC)"
+  printf '%-32s %-18s %-8s %-8s %-10s %-10s %-10s %-8s %-39s %-20s\n' \
+    "SECRET" "LABEL" "ENABLED" "ACTIVE" "IN" "OUT" "TOTAL" "CONN" "LAST_IP" "ACTIVE_UNTIL(UTC)"
 
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
-    local secret label enabled active expires bytes_in bytes_out bytes_total connections
+    local secret label enabled active expires bytes_in bytes_out bytes_total connections last_ip
     secret="$(secret_row_field "$row" secret)"
     [[ -n "$secret" ]] || continue
     if [[ -n "$wanted" && "${secret,,}" != "${wanted,,}" ]]; then
@@ -982,13 +1035,15 @@ cmd_secret_stats() {
     bytes_out="$(secret_row_field "$row" bytes_out)"
     bytes_total="$(secret_row_field "$row" bytes_total)"
     connections="$(secret_row_field "$row" connections)"
+    last_ip="$(secret_row_field "$row" last_ip)"
     [[ -n "$bytes_in" ]] || bytes_in=0
     [[ -n "$bytes_out" ]] || bytes_out=0
     [[ -n "$bytes_total" ]] || bytes_total=$(( bytes_in + bytes_out ))
     [[ -n "$connections" ]] || connections=0
-    printf '%-32s %-18s %-8s %-8s %-10s %-10s %-10s %-8s %-20s\n' \
+    [[ -n "$last_ip" ]] || last_ip="-"
+    printf '%-32s %-18s %-8s %-8s %-10s %-10s %-10s %-8s %-39s %-20s\n' \
       "$secret" "$label" "$enabled" "$active" \
-      "$(fmt_bytes "$bytes_in")" "$(fmt_bytes "$bytes_out")" "$(fmt_bytes "$bytes_total")" "$connections" \
+      "$(fmt_bytes "$bytes_in")" "$(fmt_bytes "$bytes_out")" "$(fmt_bytes "$bytes_total")" "$connections" "$last_ip" \
       "$(iso_utc_from_unix "$expires")"
     found=1
   done <<<"$rows"

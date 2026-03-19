@@ -99,6 +99,7 @@ int cpu_tcp_server_writer (connection_job_t C) /* {{{ */ {
 int cpu_tcp_server_reader (connection_job_t C) /* {{{ */ {
   assert_net_cpu_thread ();
   struct connection_info *c = CONN_INFO(C);
+  int before_bytes = c->in.total_bytes;
 
   while (1) {
     struct raw_message *raw = mpq_pop_nw (c->in_queue, 4);
@@ -117,11 +118,15 @@ int cpu_tcp_server_reader (connection_job_t C) /* {{{ */ {
   }
 
   int r = c->in.total_bytes;
+  int newly_received = r - before_bytes;
+  if (newly_received < 0) {
+    newly_received = 0;
+  }
         
   int s = c->skip_bytes;
 
   if (c->type->data_received) {
-    c->type->data_received (C, r);
+    c->type->data_received (C, newly_received);
   }
 
   if (c->flags & (C_FAILED | C_ERROR | C_NET_FAILED)) {

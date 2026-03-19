@@ -162,11 +162,13 @@ struct ext_secret_entry {
   unsigned char secret[16];
   char hex[33];
   char label[EXT_SECRET_LABEL_MAX];
+  char last_ip[64];
   int id;
   int enabled;
   long long created_at;
   long long updated_at;
   long long expires_at;
+  long long last_seen_at;
 };
 
 struct ext_secret_metric {
@@ -291,6 +293,81 @@ static void ext_sanitize_label (const char *in, char out[EXT_SECRET_LABEL_MAX]) 
   out[i] = 0;
 }
 
+static void ext_sanitize_ip (const char *in, char out[64]) {
+  int i = 0;
+  if (!in) {
+    out[0] = 0;
+    return;
+  }
+  while (*in && i < 63) {
+    unsigned char c = (unsigned char) *in++;
+    if (isalnum (c) || c == '.' || c == ':' || c == '%') {
+      out[i++] = (char) c;
+    }
+  }
+  out[i] = 0;
+}
+
+static int ext_split_tsv_line (char *line, char **cols, int max_cols) {
+  if (!line || !cols || max_cols <= 0) {
+    return 0;
+  }
+  line[strcspn (line, "\r\n")] = 0;
+  int n = 0;
+  char *p = line;
+  while (n < max_cols) {
+    cols[n++] = p;
+    char *tab = strchr (p, '\t');
+    if (!tab) {
+      break;
+    }
+    *tab = 0;
+    p = tab + 1;
+  }
+  return n;
+}
+
+static int ext_is_int_str (const char *s) {
+  if (!s || !*s) {
+    return 0;
+  }
+  if (*s == '-' || *s == '+') {
+    s++;
+  }
+  if (!*s) {
+    return 0;
+  }
+  while (*s) {
+    if (!isdigit ((unsigned char) *s)) {
+      return 0;
+    }
+    s++;
+  }
+  return 1;
+}
+
+static void ext_format_remote_ip (connection_job_t C, char out[64]) {
+  out[0] = 0;
+  if (!C) {
+    return;
+  }
+  struct connection_info *c = CONN_INFO (C);
+  if (c->remote_ip) {
+    struct in_addr a;
+    a.s_addr = htonl (c->remote_ip);
+    if (!inet_ntop (AF_INET, &a, out, 64)) {
+      out[0] = 0;
+    }
+    return;
+  }
+  if (!memcmp (c->remote_ipv6, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16)) {
+    return;
+  }
+  if (!inet_ntop (AF_INET6, c->remote_ipv6, out, 64)) {
+    out[0] = 0;
+  }
+}
+
 static int ext_is_active_locked (const struct ext_secret_entry *E, long long now) {
   if (!E->enabled) {
     return 0;
@@ -305,6 +382,16 @@ static int ext_find_idx_locked (const unsigned char secret[16]) {
   int i;
   for (i = 0; i < ext_secret_cnt; i++) {
     if (!memcmp (ext_secrets[i].secret, secret, 16)) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+static int ext_find_idx_by_id_locked (int id) {
+  int i;
+  for (i = 0; i < ext_secret_cnt; i++) {
+    if (ext_secrets[i].id == id) {
       return i;
     }
   }
@@ -363,9 +450,19 @@ static void ext_metrics_attach_secret_to_connection (connection_job_t C, int sec
   }
   D->extra_int2 = secret_id;
 
-  pthread_rwlock_rdlock (&ext_secret_lock);
+  pthread_rwlock_wrlock (&ext_secret_lock);
   if (secret_id > 0 && secret_id < ext_secret_metrics_cap) {
-    __sync_fetch_and_add (&ext_secret_metrics[secret_id].connections, 1);
+    ext_secret_metrics[secret_id].connections++;
+  }
+  int idx = ext_find_idx_by_id_locked (secret_id);
+  if (idx >= 0) {
+    struct ext_secret_entry *E = &ext_secrets[idx];
+    char ipbuf[64];
+    ext_format_remote_ip (C, ipbuf);
+    if (ipbuf[0]) {
+      ext_sanitize_ip (ipbuf, E->last_ip);
+    }
+    E->last_seen_at = ext_now_sec();
   }
   pthread_rwlock_unlock (&ext_secret_lock);
   __sync_fetch_and_add (&ext_total_connections, 1);
@@ -444,7 +541,7 @@ static int ext_persist_locked (void) {
     return -1;
   }
 
-  fprintf (f, "v2\t%lld\t%lld\t%lld\t%d\n",
+  fprintf (f, "v3\t%lld\t%lld\t%lld\t%d\n",
            ext_atomic_load_ll (&ext_total_bytes_in),
            ext_atomic_load_ll (&ext_total_bytes_out),
            ext_atomic_load_ll (&ext_total_connections),
@@ -456,9 +553,9 @@ static int ext_persist_locked (void) {
     long long bytes_in = M ? ext_atomic_load_ll (&M->bytes_in) : 0;
     long long bytes_out = M ? ext_atomic_load_ll (&M->bytes_out) : 0;
     long long connections = M ? ext_atomic_load_ll (&M->connections) : 0;
-    fprintf (f, "%s\t%d\t%lld\t%lld\t%lld\t%d\t%lld\t%lld\t%lld\t%s\n",
+    fprintf (f, "%s\t%d\t%lld\t%lld\t%lld\t%d\t%lld\t%lld\t%lld\t%lld\t%s\t%s\n",
              E->hex, E->enabled, E->expires_at, E->created_at, E->updated_at,
-             E->id, bytes_in, bytes_out, connections, E->label);
+             E->id, bytes_in, bytes_out, connections, E->last_seen_at, E->last_ip, E->label);
   }
   fflush (f);
   fsync (fileno (f));
@@ -555,9 +652,9 @@ int tcp_rpcs_load_secrets_state (void) {
     if (n <= 1 || line[0] == '#') {
       continue;
     }
-    if (!strncmp (line, "v2", 2)) {
+    if (!strncmp (line, "v3\t", 3) || !strncmp (line, "v2\t", 3)) {
       char *saveptr = NULL;
-      (void) strtok_r (line, "\t\r\n", &saveptr); // v2
+      (void) strtok_r (line, "\t\r\n", &saveptr); // v2/v3
       char *total_in_s = strtok_r (NULL, "\t\r\n", &saveptr);
       char *total_out_s = strtok_r (NULL, "\t\r\n", &saveptr);
       char *total_conn_s = strtok_r (NULL, "\t\r\n", &saveptr);
@@ -580,32 +677,43 @@ int tcp_rpcs_load_secrets_state (void) {
       continue;
     }
 
-    char *saveptr = NULL;
-    char *hex = strtok_r (line, "\t\r\n", &saveptr);
-    char *enabled_s = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *expires_s = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *created_s = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *updated_s = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *col6 = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *col7 = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *col8 = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *col9 = strtok_r (NULL, "\t\r\n", &saveptr);
-    char *label = strtok_r (NULL, "\t\r\n", &saveptr);
-    if (!hex || !enabled_s || !expires_s || !created_s || !updated_s) {
+    char *cols[16];
+    int cn = ext_split_tsv_line (line, cols, 16);
+    if (cn < 5) {
       continue;
     }
 
+    char *hex = cols[0];
+    char *enabled_s = cols[1];
+    char *expires_s = cols[2];
+    char *created_s = cols[3];
+    char *updated_s = cols[4];
     int parsed_id = 0;
     long long bytes_in = 0;
     long long bytes_out = 0;
     long long connections = 0;
-    if (col6 && col7 && col8 && col9) {
-      parsed_id = atoi (col6);
-      bytes_in = atoll (col7);
-      bytes_out = atoll (col8);
-      connections = atoll (col9);
-    } else {
-      label = col6;
+    long long last_seen_at = 0;
+    char last_ip[64];
+    last_ip[0] = 0;
+    const char *label = "";
+    if (cn >= 10 &&
+        ext_is_int_str (cols[5]) &&
+        ext_is_int_str (cols[6]) &&
+        ext_is_int_str (cols[7]) &&
+        ext_is_int_str (cols[8])) {
+      parsed_id = atoi (cols[5]);
+      bytes_in = atoll (cols[6]);
+      bytes_out = atoll (cols[7]);
+      connections = atoll (cols[8]);
+      if (cn >= 12 && ext_is_int_str (cols[9])) {
+        last_seen_at = atoll (cols[9]);
+        ext_sanitize_ip (cols[10], last_ip);
+        label = cols[11];
+      } else {
+        label = cols[9];
+      }
+    } else if (cn >= 6) {
+      label = cols[5];
     }
 
     unsigned char secret[16];
@@ -630,7 +738,13 @@ int tcp_rpcs_load_secrets_state (void) {
       E->expires_at = atoll (expires_s);
       E->created_at = atoll (created_s);
       E->updated_at = atoll (updated_s);
-      ext_sanitize_label (label ? label : "", E->label);
+      ext_sanitize_label (label, E->label);
+      if (last_seen_at > 0) {
+        E->last_seen_at = last_seen_at;
+      }
+      if (last_ip[0]) {
+        ext_sanitize_ip (last_ip, E->last_ip);
+      }
       if (parsed_id > 0) {
         E->id = parsed_id;
       } else if (E->id <= 0) {
@@ -640,7 +754,7 @@ int tcp_rpcs_load_secrets_state (void) {
         if (ext_metrics_reserve_locked (E->id) < 0) {
           continue;
         }
-        if (col6 && col7 && col8 && col9) {
+        if (cn >= 10) {
           ext_secret_metrics[E->id].bytes_in = bytes_in;
           ext_secret_metrics[E->id].bytes_out = bytes_out;
           ext_secret_metrics[E->id].connections = connections;
@@ -663,7 +777,11 @@ int tcp_rpcs_load_secrets_state (void) {
     E->expires_at = atoll (expires_s);
     E->created_at = atoll (created_s);
     E->updated_at = atoll (updated_s);
-    ext_sanitize_label (label ? label : "", E->label);
+    E->last_seen_at = last_seen_at > 0 ? last_seen_at : 0;
+    if (last_ip[0]) {
+      ext_sanitize_ip (last_ip, E->last_ip);
+    }
+    ext_sanitize_label (label, E->label);
     if (parsed_id > 0) {
       E->id = parsed_id;
     } else {
@@ -674,7 +792,7 @@ int tcp_rpcs_load_secrets_state (void) {
         ext_secret_cnt--;
         break;
       }
-      if (col6 && col7 && col8 && col9) {
+      if (cn >= 10) {
         ext_secret_metrics[E->id].bytes_in = bytes_in;
         ext_secret_metrics[E->id].bytes_out = bytes_out;
         ext_secret_metrics[E->id].connections = connections;
@@ -1153,10 +1271,10 @@ static int ext_http_append_list_json (struct ext_strbuf *B) {
                         "{\"secret\":\"%s\",\"enabled\":%s,\"active\":%s,"
                         "\"expires\":%lld,\"created\":%lld,\"updated\":%lld,\"id\":%d,"
                         "\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld,"
-                        "\"label\":\"%s\"}",
+                        "\"last_seen\":%lld,\"last_ip\":\"%s\",\"label\":\"%s\"}",
                         E->hex, E->enabled ? "true" : "false", active ? "true" : "false",
                         E->expires_at, E->created_at, E->updated_at, E->id,
-                        bytes_in, bytes_out, bytes_in + bytes_out, connections, E->label) < 0) {
+                        bytes_in, bytes_out, bytes_in + bytes_out, connections, E->last_seen_at, E->last_ip, E->label) < 0) {
       pthread_rwlock_unlock (&ext_secret_lock);
       return -1;
     }
@@ -1195,10 +1313,11 @@ static int ext_http_append_stats_json (struct ext_strbuf *B) {
     }
     if (ext_sb_appendf (B,
                         "{\"secret\":\"%s\",\"label\":\"%s\",\"id\":%d,\"enabled\":%s,\"active\":%s,"
-                        "\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld}",
+                        "\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld,"
+                        "\"last_seen\":%lld,\"last_ip\":\"%s\"}",
                         E->hex, E->label, E->id,
                         E->enabled ? "true" : "false", active ? "true" : "false",
-                        s_in, s_out, s_in + s_out, s_conn) < 0) {
+                        s_in, s_out, s_in + s_out, s_conn, E->last_seen_at, E->last_ip) < 0) {
       pthread_rwlock_unlock (&ext_secret_lock);
       return -1;
     }
@@ -1292,9 +1411,9 @@ static void ext_admin_handle_line (int fd, char *line) {
       long long s_out = M ? ext_atomic_load_ll (&M->bytes_out) : 0;
       long long s_conn = M ? ext_atomic_load_ll (&M->connections) : 0;
       n = snprintf (out, sizeof (out),
-                    "secret=%s id=%d enabled=%d expires=%lld created=%lld updated=%lld bytes_in=%lld bytes_out=%lld bytes_total=%lld connections=%lld label=%s\n",
+                    "secret=%s id=%d enabled=%d expires=%lld created=%lld updated=%lld bytes_in=%lld bytes_out=%lld bytes_total=%lld connections=%lld last_seen=%lld last_ip=%s label=%s\n",
                     E->hex, E->id, E->enabled, E->expires_at, E->created_at, E->updated_at,
-                    s_in, s_out, s_in + s_out, s_conn, E->label);
+                    s_in, s_out, s_in + s_out, s_conn, E->last_seen_at, E->last_ip, E->label);
       ext_write_all (fd, out, n);
     }
     pthread_rwlock_unlock (&ext_secret_lock);
