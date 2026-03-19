@@ -82,6 +82,10 @@ int cpu_tcp_server_writer (connection_job_t C) /* {{{ */ {
   }
  
   if (raw->total_bytes && c->io_conn) {        
+    // Account bytes actually queued to the client socket in CPU->NET path.
+    if (c->type->data_sent) {
+      c->type->data_sent (C, raw->total_bytes);
+    }
     mpq_push_w (SOCKET_CONN_INFO(c->io_conn)->out_packet_queue, raw, 0);
     if (stop) {
       __sync_fetch_and_or (&SOCKET_CONN_INFO(c->io_conn)->flags, C_STOPWRITE);
