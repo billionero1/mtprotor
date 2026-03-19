@@ -484,18 +484,19 @@ void tcp_rpcs_note_connection_traffic (connection_job_t C, int bytes_in, int byt
   int secret_id = D->extra_int2;
 
   pthread_rwlock_rdlock (&ext_secret_lock);
+  int valid_secret = (secret_id > 0 && secret_id < ext_secret_metrics_cap);
+  if (!valid_secret) {
+    pthread_rwlock_unlock (&ext_secret_lock);
+    return;
+  }
 
   if (bytes_in > 0) {
     __sync_fetch_and_add (&ext_total_bytes_in, bytes_in);
-    if (secret_id > 0 && secret_id < ext_secret_metrics_cap) {
-      __sync_fetch_and_add (&ext_secret_metrics[secret_id].bytes_in, bytes_in);
-    }
+    __sync_fetch_and_add (&ext_secret_metrics[secret_id].bytes_in, bytes_in);
   }
   if (bytes_out > 0) {
     __sync_fetch_and_add (&ext_total_bytes_out, bytes_out);
-    if (secret_id > 0 && secret_id < ext_secret_metrics_cap) {
-      __sync_fetch_and_add (&ext_secret_metrics[secret_id].bytes_out, bytes_out);
-    }
+    __sync_fetch_and_add (&ext_secret_metrics[secret_id].bytes_out, bytes_out);
   }
   pthread_rwlock_unlock (&ext_secret_lock);
 }
