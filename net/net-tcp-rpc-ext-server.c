@@ -963,6 +963,33 @@ static int ext_cmd_set_enabled (const char *hex, int enabled) {
   return r;
 }
 
+static int ext_cmd_update (const char *hex, const char *label, int has_label, long long expires_at, int has_expires, int enabled, int has_enabled) {
+  unsigned char secret[16];
+  if (ext_secret16_from_hex (hex, secret) < 0) {
+    return -2;
+  }
+  pthread_rwlock_wrlock (&ext_secret_lock);
+  int idx = ext_find_idx_locked (secret);
+  if (idx < 0) {
+    pthread_rwlock_unlock (&ext_secret_lock);
+    return -3;
+  }
+  struct ext_secret_entry *E = &ext_secrets[idx];
+  if (has_label) {
+    ext_sanitize_label (label ? label : "", E->label);
+  }
+  if (has_expires) {
+    E->expires_at = expires_at > 0 ? expires_at : 0;
+  }
+  if (has_enabled) {
+    E->enabled = enabled ? 1 : 0;
+  }
+  E->updated_at = ext_now_sec();
+  int r = ext_persist_locked();
+  pthread_rwlock_unlock (&ext_secret_lock);
+  return r;
+}
+
 static int ext_cmd_disable_expired (long long now, int *checked_out, int *disabled_out, long long *now_out) {
   if (now <= 0) {
     now = ext_now_sec();
@@ -1684,23 +1711,58 @@ static void ext_admin_handle_http (int fd, char *req) {
     char tmp[1024];
     snprintf (tmp, sizeof (tmp), "%s", path + 12);
     char *slash = strchr (tmp, '/');
-    if (!slash) {
-      ext_http_send_error (fd, 404, "not found");
+    if (slash) {
+      *slash = 0;
+      const char *secret = tmp;
+      const char *action = slash + 1;
+      int enable;
+      if (!strcmp (action, "enable")) {
+        enable = 1;
+      } else if (!strcmp (action, "disable")) {
+        enable = 0;
+      } else {
+        ext_http_send_error (fd, 404, "not found");
+        return;
+      }
+      int rc = ext_cmd_set_enabled (secret, enable);
+      if (rc == -2) {
+        ext_http_send_error (fd, 400, "invalid secret format");
+      } else if (rc == -3) {
+        ext_http_send_error (fd, 404, "secret not found");
+      } else if (rc < 0) {
+        ext_http_send_error (fd, 500, "update failed");
+      } else {
+        ext_http_send_json (fd, 200, "{\"ok\":true}");
+      }
       return;
     }
-    *slash = 0;
+
     const char *secret = tmp;
-    const char *action = slash + 1;
-    int enable;
-    if (!strcmp (action, "enable")) {
-      enable = 1;
-    } else if (!strcmp (action, "disable")) {
-      enable = 0;
-    } else {
-      ext_http_send_error (fd, 404, "not found");
+    char label[EXT_SECRET_LABEL_MAX];
+    label[0] = 0;
+    int has_label = ext_http_json_get_string (body, "label", label, sizeof (label));
+    long long expires = 0;
+    int has_expires = 0;
+    if (!ext_http_json_get_int64 (body, "expires", &expires, &has_expires)) {
+      ext_http_send_error (fd, 400, "invalid expires");
       return;
     }
-    int rc = ext_cmd_set_enabled (secret, enable);
+    if (!has_expires && !ext_http_json_get_int64 (body, "expires_at", &expires, &has_expires)) {
+      ext_http_send_error (fd, 400, "invalid expires_at");
+      return;
+    }
+    int enabled = 0;
+    int has_enabled = 0;
+    if (!ext_http_json_get_bool (body, "enabled", &enabled, &has_enabled)) {
+      ext_http_send_error (fd, 400, "invalid enabled");
+      return;
+    }
+    if (!has_label && !has_expires && !has_enabled) {
+      ext_http_send_error (fd, 400, "nothing to update");
+      return;
+    }
+
+    int rc = ext_cmd_update (secret, label, has_label, expires, has_expires, enabled, has_enabled);
     if (rc == -2) {
       ext_http_send_error (fd, 400, "invalid secret format");
     } else if (rc == -3) {

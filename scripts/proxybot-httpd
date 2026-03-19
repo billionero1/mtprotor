@@ -324,7 +324,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         sub, full_path = self._route()
-        if sub not in ("/issue", "/enable", "/disable", "/revoke"):
+        if sub not in ("/issue", "/renew", "/enable", "/disable", "/revoke"):
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
 
@@ -346,6 +346,27 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "days must be integer 1..3650"})
                     return
                 args += ["--days", str(days)]
+        elif sub == "/renew":
+            secret = str(body.get("secret", "")).strip().lower()
+            if len(secret) != 32 or any(c not in "0123456789abcdef" for c in secret):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "secret must be hex32"})
+                return
+            if "days" in body and "expires" in body:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "use either days or expires"})
+                return
+            args = ["bot", "renew", secret]
+            if "days" in body:
+                days = body.get("days")
+                if not isinstance(days, int) or days < 1 or days > 3650:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "days must be integer 1..3650"})
+                    return
+                args += ["--days", str(days)]
+            if "expires" in body:
+                expires = body.get("expires")
+                if not isinstance(expires, int) or expires < 1:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "expires must be unix timestamp"})
+                    return
+                args += ["--expires", str(expires)]
         else:
             secret = str(body.get("secret", "")).strip().lower()
             if len(secret) != 32 or any(c not in "0123456789abcdef" for c in secret):

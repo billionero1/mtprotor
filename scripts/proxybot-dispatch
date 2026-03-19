@@ -7,6 +7,7 @@ Allowed commands:
   health
   stats
   issue <label> [--days N]
+  renew <secret_hex32> [--days N | --expires TS]
   disable <secret_hex32>
   enable <secret_hex32>
   revoke <secret_hex32>
@@ -48,6 +49,22 @@ case "$cmd" in
       exec /usr/local/bin/proxyctl bot issue "$label" --days "${argv[3]}"
     fi
     die "invalid issue arguments"
+    ;;
+
+  renew)
+    [[ ${#argv[@]} -ge 2 ]] || die "secret is required"
+    secret="${argv[1]}"
+    [[ "$secret" =~ ^[0-9a-fA-F]{32}$ ]] || die "secret must be hex32"
+    if [[ ${#argv[@]} -eq 2 ]]; then
+      exec /usr/local/bin/proxyctl bot renew "${secret,,}"
+    fi
+    if [[ ${#argv[@]} -eq 4 && "${argv[2]}" == "--days" && "${argv[3]}" =~ ^[0-9]+$ ]]; then
+      exec /usr/local/bin/proxyctl bot renew "${secret,,}" --days "${argv[3]}"
+    fi
+    if [[ ${#argv[@]} -eq 4 && "${argv[2]}" == "--expires" && "${argv[3]}" =~ ^[0-9]+$ ]]; then
+      exec /usr/local/bin/proxyctl bot renew "${secret,,}" --expires "${argv[3]}"
+    fi
+    die "invalid renew arguments"
     ;;
 
   disable|enable|revoke)

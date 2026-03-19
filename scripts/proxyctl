@@ -113,6 +113,8 @@ Usage:
   proxyctl secret stats [<secret_hex>]
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
   proxyctl secret issue <label> [--days <n> | --expires <unix_ts>] [--prefix dd|plain|ee]
+  proxyctl secret update <secret> [--label <label>] [--expires <unix_ts>] [--enable|--disable]
+  proxyctl secret renew <secret> [--days <n> | --expires <unix_ts>]
   proxyctl secret remove <secret>
   proxyctl secret enable <secret>
   proxyctl secret disable <secret>
@@ -120,6 +122,7 @@ Usage:
 
   proxyctl bot health
   proxyctl bot issue <label> [--days <n>]
+  proxyctl bot renew <secret> [--days <n> | --expires <unix_ts>]
   proxyctl bot disable <secret>
   proxyctl bot enable <secret>
   proxyctl bot revoke <secret>
@@ -1175,6 +1178,107 @@ cmd_secret_issue() {
   audit_log info "secret_issue secret=$secret label=$label expires=$expires prefix=$prefix"
 }
 
+cmd_secret_update() {
+  local secret="${1:-}"
+  shift || true
+  ensure_socket
+  require_hex32 "$secret" || die "Usage: proxyctl secret update <secret> [--label <label>] [--expires <unix_ts>] [--enable|--disable]"
+
+  local label=""
+  local has_label=0
+  local expires=""
+  local has_expires=0
+  local enabled=""
+  local has_enabled=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --label)
+        label="${2:-}"; has_label=1; shift 2 ;;
+      --expires)
+        expires="${2:-}"; [[ "$expires" =~ ^[0-9]+$ ]] || die "expires must be unix timestamp"; has_expires=1; shift 2 ;;
+      --enable)
+        enabled="true"; has_enabled=1; shift ;;
+      --disable)
+        enabled="false"; has_enabled=1; shift ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+  (( has_label || has_expires || has_enabled )) || die "nothing to update"
+
+  local payload='{'
+  local sep=""
+  if (( has_label )); then
+    payload+="${sep}\"label\":\"$(json_escape "$label")\""
+    sep=","
+  fi
+  if (( has_expires )); then
+    payload+="${sep}\"expires\":$expires"
+    sep=","
+  fi
+  if (( has_enabled )); then
+    payload+="${sep}\"enabled\":$enabled"
+  fi
+  payload+='}'
+  api_call_with_log PATCH "/v1/secrets/$secret" "$payload" \
+    "secret_update secret=$secret" \
+    "secret_update_failed secret=$secret"
+}
+
+cmd_secret_renew() {
+  local secret="${1:-}"
+  shift || true
+  ensure_socket
+  require_hex32 "$secret" || die "Usage: proxyctl secret renew <secret> [--days <n> | --expires <unix_ts>]"
+
+  local days=""
+  local expires=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --days)
+        days="${2:-}"; [[ "$days" =~ ^[0-9]+$ ]] || die "days must be integer"; shift 2 ;;
+      --expires)
+        expires="${2:-}"; [[ "$expires" =~ ^[0-9]+$ ]] || die "expires must be unix timestamp"; shift 2 ;;
+      *)
+        die "Unknown option: $1"
+        ;;
+    esac
+  done
+  [[ -n "$days" || -n "$expires" ]] || days="30"
+  [[ -n "$days" && -n "$expires" ]] && die "use either --days or --expires"
+
+  local target_expires="$expires"
+  if [[ -n "$days" ]]; then
+    local now cur base json row
+    now="$(date +%s)"
+    json="$(request GET /v1/secrets)"
+    row="$(secrets_json_rows "$json" | grep -m1 -i "\"secret\":\"${secret,,}\"" || true)"
+    [[ -n "$row" ]] || die "secret not found: $secret"
+    cur="$(secret_row_field "$row" expires)"
+    [[ -n "$cur" ]] || cur=0
+    if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur > now )); then
+      base="$cur"
+    else
+      base="$now"
+    fi
+    target_expires="$(( base + days * 86400 ))"
+  fi
+
+  local resp active_until
+  resp="$(request PATCH "/v1/secrets/$secret" "{\"expires\":$target_expires,\"enabled\":true}")"
+  if json_is_ok "$resp"; then
+    active_until="$(iso_utc_from_unix "$target_expires")"
+    printf '{"ok":true,"secret":"%s","expires":%s,"active_until":"%s"}\n' \
+      "$secret" "$target_expires" "$active_until"
+    audit_log info "secret_renew secret=$secret expires=$target_expires"
+  else
+    echo "$resp"
+    audit_log warn "secret_renew_failed secret=$secret expires=$target_expires response=$(echo "$resp" | tr -d '\n')"
+  fi
+}
+
 cmd_secret() {
   local sub="${1:-}"
   case "$sub" in
@@ -1201,6 +1305,18 @@ cmd_secret() {
       [[ -n "$label" ]] || die "Usage: proxyctl secret issue <label> ..."
       shift 2
       cmd_secret_issue "$label" "$@"
+      ;;
+    update)
+      local secret_upd="${2:-}"
+      [[ -n "$secret_upd" ]] || die "Usage: proxyctl secret update <secret> ..."
+      shift 2
+      cmd_secret_update "$secret_upd" "$@"
+      ;;
+    renew)
+      local secret_renew="${2:-}"
+      [[ -n "$secret_renew" ]] || die "Usage: proxyctl secret renew <secret> ..."
+      shift 2
+      cmd_secret_renew "$secret_renew" "$@"
       ;;
     remove)
       local secret_rm="${2:-}"
@@ -1341,6 +1457,12 @@ cmd_bot() {
       [[ -n "$label" ]] || die "Usage: proxyctl bot issue <label> [--days N]"
       shift 2
       cmd_secret_issue "$label" "$@"
+      ;;
+    renew)
+      local secrn="${2:-}"
+      [[ -n "$secrn" ]] || die "Usage: proxyctl bot renew <secret> [--days N|--expires TS]"
+      shift 2
+      cmd_secret_renew "$secrn" "$@"
       ;;
     disable)
       local secd="${2:-}"

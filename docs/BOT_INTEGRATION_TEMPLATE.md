@@ -58,6 +58,21 @@ Content-Type: application/json
 {"label":"user_1001","days":30}
 ```
 
+### Renew access
+```http
+POST /<base_path>/renew
+Content-Type: application/json
+
+{"secret":"<hex32>","days":30}
+```
+or
+```http
+POST /<base_path>/renew
+Content-Type: application/json
+
+{"secret":"<hex32>","expires":1774051200}
+```
+
 ### Disable access
 ```http
 POST /<base_path>/disable
@@ -85,7 +100,7 @@ Content-Type: application/json
 ## Suggested Lifecycle
 1. Payment success -> `issue`.
 2. Grace/failure -> `disable`.
-3. Renewed -> `enable`.
+3. Renewed -> `renew` (extends `ACTIVE_UNTIL`).
 4. Final expiry -> `revoke`.
 
 ## SSH Fallback (Forced Command)
@@ -101,6 +116,7 @@ Allowed SSH commands:
 - `health`
 - `stats`
 - `issue <label> [--days N]`
+- `renew <secret_hex32> [--days N|--expires TS]`
 - `disable <secret_hex32>`
 - `enable <secret_hex32>`
 - `revoke <secret_hex32>`

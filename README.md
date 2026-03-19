@@ -224,6 +224,7 @@ HTTP contract (all JSON):
 - `GET <base_path>/stats`
 - `GET <base_path>/secrets`
 - `POST <base_path>/issue` body: `{"label":"user_1001","days":30}`
+- `POST <base_path>/renew` body: `{"secret":"<hex32>","days":30}` or `{"secret":"<hex32>","expires":<unix_ts>}`
 - `POST <base_path>/enable` body: `{"secret":"<hex32>"}`
 - `POST <base_path>/disable` body: `{"secret":"<hex32>"}`
 - `POST <base_path>/revoke` body: `{"secret":"<hex32>"}`
@@ -269,14 +270,16 @@ Examples:
 ```bash
 ssh bulldogtg1 "proxyctl bot health"
 ssh bulldogtg1 "proxyctl bot issue user_987 --days 30"
+ssh bulldogtg1 "proxyctl bot renew <hex32> --days 30"
 ssh bulldogtg1 "proxyctl bot disable <hex32>"
 ssh bulldogtg1 "proxyctl bot revoke <hex32>"
 ```
 
 This gives full lifecycle control for subscriptions:
 1. issue on payment
-2. disable on grace/failure
-3. remove on final expiry
+2. renew on extension
+3. disable on grace/failure
+4. remove on final expiry
 
 ### Security recommendations for bot integration
 - Keep runtime admin API on Unix socket local-only (default).
@@ -301,6 +304,7 @@ Endpoints:
 - `POST /v1/secrets`
 - `POST /v1/secrets/expire_disable`
 - `DELETE /v1/secrets/{secret}`
+- `PATCH /v1/secrets/{secret}` body supports: `label`, `expires`/`expires_at`, `enabled`
 - `PATCH /v1/secrets/{secret}/enable`
 - `PATCH /v1/secrets/{secret}/disable`
 
@@ -309,7 +313,7 @@ Legacy line-protocol includes: `PING`, `STATUS`, `STATS`, `LIST`, `ADD`, `REMOVE
 Traffic fields:
 - `/v1/status`: global counters `bytes_in`, `bytes_out`, `bytes_total`, `connections`
 - `/v1/stats`: global totals + per-secret traffic list
-- `/v1/secrets`: per-secret fields `bytes_in`, `bytes_out`, `bytes_total`, `connections`
+- `/v1/secrets`: per-secret fields `bytes_in`, `bytes_out`, `bytes_total`, `connections`, `last_ip`, `last_seen`
 
 Accepted secret formats:
 - plain: `<32 hex>`
