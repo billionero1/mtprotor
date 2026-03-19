@@ -2428,6 +2428,11 @@ void mtfront_pre_start (void) {
 }
 
 void mtfront_on_exit (void) {
+  if (hot_secrets_state_file) {
+    if (tcp_rpcs_flush_secrets_state () < 0) {
+      kprintf ("failed to flush hot-reload secrets state on exit\n");
+    }
+  }
   if (workers) {
     if (signal_check_pending (SIGTERM)) {
       kill_children (SIGTERM);

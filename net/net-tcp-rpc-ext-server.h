@@ -32,6 +32,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t c);
 void tcp_rpcs_set_ext_secret(unsigned char secret[16]);
 void tcp_rpcs_set_secrets_state_file (const char *path);
 int tcp_rpcs_load_secrets_state (void);
+int tcp_rpcs_flush_secrets_state (void);
 int tcp_rpcs_start_admin_server (const char *socket_path, const char *token);
 int tcp_rpcs_active_secret_count (long long now);
 int tcp_rpcs_total_secret_count (void);

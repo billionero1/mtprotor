@@ -826,6 +826,13 @@ int tcp_rpcs_load_secrets_state (void) {
   return 0;
 }
 
+int tcp_rpcs_flush_secrets_state (void) {
+  pthread_rwlock_wrlock (&ext_secret_lock);
+  int r = ext_persist_locked ();
+  pthread_rwlock_unlock (&ext_secret_lock);
+  return r;
+}
+
 int tcp_rpcs_total_secret_count (void) {
   int n;
   pthread_rwlock_rdlock (&ext_secret_lock);
@@ -961,7 +968,6 @@ static int ext_cmd_disable_expired (long long now, int *checked_out, int *disabl
   }
   int checked = 0;
   int disabled = 0;
-  int changed = 0;
 
   pthread_rwlock_wrlock (&ext_secret_lock);
   int i;
@@ -972,13 +978,9 @@ static int ext_cmd_disable_expired (long long now, int *checked_out, int *disabl
       E->enabled = 0;
       E->updated_at = now;
       disabled++;
-      changed = 1;
     }
   }
-  int r = 0;
-  if (changed) {
-    r = ext_persist_locked();
-  }
+  int r = ext_persist_locked();
   pthread_rwlock_unlock (&ext_secret_lock);
 
   if (checked_out) {
