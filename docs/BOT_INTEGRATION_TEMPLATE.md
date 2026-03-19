@@ -37,10 +37,18 @@ Authorization: Basic base64(login:password)
 X-API-Key: <api_key>
 ```
 
+### Runtime stats (global + per-secret)
+```http
+GET /<base_path>/stats
+Authorization: Basic base64(login:password)
+X-API-Key: <api_key>
+```
+
 ### List secrets
 ```http
 GET /<base_path>/secrets
 ```
+`/secrets` includes traffic fields for each secret: `bytes_in`, `bytes_out`, `bytes_total`, `connections`.
 
 ### Issue access
 ```http
@@ -91,6 +99,7 @@ proxyctl bot ssh rotate-password --user mtproxybot --allow-from <BOT_SERVER_IP>
 
 Allowed SSH commands:
 - `health`
+- `stats`
 - `issue <label> [--days N]`
 - `disable <secret_hex32>`
 - `enable <secret_hex32>`

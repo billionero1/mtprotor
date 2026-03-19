@@ -5,6 +5,7 @@ usage() {
   cat <<USAGE
 Allowed commands:
   health
+  stats
   issue <label> [--days N]
   disable <secret_hex32>
   enable <secret_hex32>
@@ -30,6 +31,10 @@ cmd="${argv[0]}"
 case "$cmd" in
   health)
     exec /usr/local/bin/proxyctl bot health
+    ;;
+
+  stats)
+    exec /usr/local/bin/proxyctl stats
     ;;
 
   issue)

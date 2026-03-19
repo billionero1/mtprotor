@@ -89,6 +89,7 @@ usage() {
   cat <<USAGE
 Usage:
   proxyctl status
+  proxyctl stats
   proxyctl health
   proxyctl link [--secret <hex32>] [--host <host>] [--port <port>] [--plain|--dd|--ee] [--domain <host>]
 
@@ -109,6 +110,7 @@ Usage:
   proxyctl config set domain-camouflage <domain|off>
 
   proxyctl secret list [--table]
+  proxyctl secret stats [<secret_hex>]
   proxyctl secret add <secret> [--label <label>] [--expires <unix_ts>] [--disabled]
   proxyctl secret issue <label> [--days <n> | --expires <unix_ts>] [--prefix dd|plain|ee]
   proxyctl secret remove <secret>
@@ -290,6 +292,18 @@ secret_row_field() {
       ;;
     label)
       echo "$row" | sed -n 's/.*"label":"\([^"]*\)".*/\1/p'
+      ;;
+    bytes_in)
+      echo "$row" | sed -n 's/.*"bytes_in":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    bytes_out)
+      echo "$row" | sed -n 's/.*"bytes_out":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    bytes_total)
+      echo "$row" | sed -n 's/.*"bytes_total":\([0-9][0-9]*\).*/\1/p'
+      ;;
+    connections)
+      echo "$row" | sed -n 's/.*"connections":\([0-9][0-9]*\).*/\1/p'
       ;;
     *)
       echo ""
@@ -700,6 +714,10 @@ cmd_status() {
   api GET /v1/status
 }
 
+cmd_stats() {
+  api GET /v1/stats
+}
+
 cmd_health() {
   local active="no"
   local api_ok="no"
@@ -892,7 +910,8 @@ cmd_secret_list_table() {
   json="$(request GET /v1/secrets)"
   now="$(date +%s)"
 
-  printf '%-10s %-8s %-8s %-20s %-32s %s\n' "STATUS" "ENABLED" "ACTIVE" "ACTIVE_UNTIL(UTC)" "SECRET" "LABEL"
+  printf '%-10s %-8s %-8s %-20s %-10s %-10s %-10s %-6s %-32s %s\n' \
+    "STATUS" "ENABLED" "ACTIVE" "ACTIVE_UNTIL(UTC)" "IN" "OUT" "TOTAL" "CONN" "SECRET" "LABEL"
 
   local rows row
   rows="$(secrets_json_rows "$json")"
@@ -902,12 +921,20 @@ cmd_secret_list_table() {
 
   while IFS= read -r row; do
     [[ -n "$row" ]] || continue
-    local secret enabled active expires label until status color
+    local secret enabled active expires label until status color bytes_in bytes_out bytes_total connections
     secret="$(secret_row_field "$row" secret)"
     enabled="$(secret_row_field "$row" enabled)"
     active="$(secret_row_field "$row" active)"
     expires="$(secret_row_field "$row" expires)"
     label="$(secret_row_field "$row" label)"
+    bytes_in="$(secret_row_field "$row" bytes_in)"
+    bytes_out="$(secret_row_field "$row" bytes_out)"
+    bytes_total="$(secret_row_field "$row" bytes_total)"
+    connections="$(secret_row_field "$row" connections)"
+    [[ -n "$bytes_in" ]] || bytes_in=0
+    [[ -n "$bytes_out" ]] || bytes_out=0
+    [[ -n "$bytes_total" ]] || bytes_total=$(( bytes_in + bytes_out ))
+    [[ -n "$connections" ]] || connections=0
     until="$(iso_utc_from_unix "$expires")"
     status="INACTIVE"
     color="$C_YELLOW"
@@ -921,9 +948,54 @@ cmd_secret_list_table() {
       status="EXPIRED"
       color="$C_YELLOW"
     fi
-    printf '%-10s %-8s %-8s %-20s %-32s %s\n' \
-      "$(paint "$color" "$status")" "$enabled" "$active" "$until" "$secret" "$label"
+    printf '%-10s %-8s %-8s %-20s %-10s %-10s %-10s %-6s %-32s %s\n' \
+      "$(paint "$color" "$status")" "$enabled" "$active" "$until" \
+      "$(fmt_bytes "$bytes_in")" "$(fmt_bytes "$bytes_out")" "$(fmt_bytes "$bytes_total")" "$connections" \
+      "$secret" "$label"
   done <<<"$rows"
+}
+
+cmd_secret_stats() {
+  local wanted="${1:-}"
+  local json rows row found
+  ensure_socket
+  json="$(request GET /v1/secrets)"
+  rows="$(secrets_json_rows "$json")"
+  found=0
+
+  printf '%-32s %-18s %-8s %-8s %-10s %-10s %-10s %-8s %-20s\n' \
+    "SECRET" "LABEL" "ENABLED" "ACTIVE" "IN" "OUT" "TOTAL" "CONN" "ACTIVE_UNTIL(UTC)"
+
+  while IFS= read -r row; do
+    [[ -n "$row" ]] || continue
+    local secret label enabled active expires bytes_in bytes_out bytes_total connections
+    secret="$(secret_row_field "$row" secret)"
+    [[ -n "$secret" ]] || continue
+    if [[ -n "$wanted" && "${secret,,}" != "${wanted,,}" ]]; then
+      continue
+    fi
+    label="$(secret_row_field "$row" label)"
+    enabled="$(secret_row_field "$row" enabled)"
+    active="$(secret_row_field "$row" active)"
+    expires="$(secret_row_field "$row" expires)"
+    bytes_in="$(secret_row_field "$row" bytes_in)"
+    bytes_out="$(secret_row_field "$row" bytes_out)"
+    bytes_total="$(secret_row_field "$row" bytes_total)"
+    connections="$(secret_row_field "$row" connections)"
+    [[ -n "$bytes_in" ]] || bytes_in=0
+    [[ -n "$bytes_out" ]] || bytes_out=0
+    [[ -n "$bytes_total" ]] || bytes_total=$(( bytes_in + bytes_out ))
+    [[ -n "$connections" ]] || connections=0
+    printf '%-32s %-18s %-8s %-8s %-10s %-10s %-10s %-8s %-20s\n' \
+      "$secret" "$label" "$enabled" "$active" \
+      "$(fmt_bytes "$bytes_in")" "$(fmt_bytes "$bytes_out")" "$(fmt_bytes "$bytes_total")" "$connections" \
+      "$(iso_utc_from_unix "$expires")"
+    found=1
+  done <<<"$rows"
+
+  if [[ -n "$wanted" && "$found" -eq 0 ]]; then
+    die "secret not found: $wanted"
+  fi
 }
 
 cmd_secret_expire_disable() {
@@ -1058,6 +1130,10 @@ cmd_secret() {
       else
         api GET /v1/secrets
       fi
+      ;;
+    stats)
+      local wanted="${2:-}"
+      cmd_secret_stats "$wanted"
       ;;
     add)
       local secret="${2:-}"
@@ -1651,6 +1727,9 @@ cmd="${1:-}"
 case "$cmd" in
   status)
     cmd_status
+    ;;
+  stats)
+    cmd_stats
     ;;
   health)
     cmd_health

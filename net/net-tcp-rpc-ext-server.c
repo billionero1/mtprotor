@@ -162,16 +162,34 @@ struct ext_secret_entry {
   unsigned char secret[16];
   char hex[33];
   char label[EXT_SECRET_LABEL_MAX];
+  int id;
   int enabled;
   long long created_at;
   long long updated_at;
   long long expires_at;
 };
 
+struct ext_secret_metric {
+  long long bytes_in;
+  long long bytes_out;
+  long long connections;
+};
+
+struct ext_active_secret {
+  unsigned char secret[16];
+  int id;
+};
+
 static pthread_rwlock_t ext_secret_lock = PTHREAD_RWLOCK_INITIALIZER;
 static struct ext_secret_entry *ext_secrets;
 static int ext_secret_cnt;
 static int ext_secret_cap;
+static int ext_secret_next_id = 1;
+static struct ext_secret_metric *ext_secret_metrics;
+static int ext_secret_metrics_cap;
+static volatile long long ext_total_bytes_in;
+static volatile long long ext_total_bytes_out;
+static volatile long long ext_total_connections;
 
 static char ext_secret_state_file[PATH_MAX];
 static char ext_secret_admin_socket[PATH_MAX];
@@ -310,6 +328,77 @@ static int ext_reserve_locked (int want) {
   return 0;
 }
 
+static int ext_metrics_reserve_locked (int want_id) {
+  if (want_id < ext_secret_metrics_cap) {
+    return 0;
+  }
+  int new_cap = ext_secret_metrics_cap ? ext_secret_metrics_cap : 64;
+  while (new_cap <= want_id) {
+    new_cap *= 2;
+  }
+  struct ext_secret_metric *p = calloc ((size_t) new_cap, sizeof (*p));
+  if (!p) {
+    return -1;
+  }
+  if (ext_secret_metrics) {
+    memcpy (p, ext_secret_metrics, sizeof (*p) * ext_secret_metrics_cap);
+    free (ext_secret_metrics);
+  }
+  ext_secret_metrics = p;
+  ext_secret_metrics_cap = new_cap;
+  return 0;
+}
+
+static inline long long ext_atomic_load_ll (volatile long long *p) {
+  return __sync_fetch_and_add ((long long *) p, 0);
+}
+
+static void ext_metrics_attach_secret_to_connection (connection_job_t C, int secret_id) {
+  if (!C || secret_id <= 0) {
+    return;
+  }
+  struct tcp_rpc_data *D = TCP_RPC_DATA (C);
+  if (D->extra_int2 == secret_id) {
+    return;
+  }
+  D->extra_int2 = secret_id;
+
+  pthread_rwlock_rdlock (&ext_secret_lock);
+  if (secret_id > 0 && secret_id < ext_secret_metrics_cap) {
+    __sync_fetch_and_add (&ext_secret_metrics[secret_id].connections, 1);
+  }
+  pthread_rwlock_unlock (&ext_secret_lock);
+  __sync_fetch_and_add (&ext_total_connections, 1);
+}
+
+void tcp_rpcs_note_connection_traffic (connection_job_t C, int bytes_in, int bytes_out) {
+  if (!C) {
+    return;
+  }
+  if (bytes_in <= 0 && bytes_out <= 0) {
+    return;
+  }
+
+  struct tcp_rpc_data *D = TCP_RPC_DATA (C);
+  int secret_id = D->extra_int2;
+
+  pthread_rwlock_rdlock (&ext_secret_lock);
+
+  if (bytes_in > 0) {
+    __sync_fetch_and_add (&ext_total_bytes_in, bytes_in);
+    if (secret_id > 0 && secret_id < ext_secret_metrics_cap) {
+      __sync_fetch_and_add (&ext_secret_metrics[secret_id].bytes_in, bytes_in);
+    }
+  }
+  if (bytes_out > 0) {
+    __sync_fetch_and_add (&ext_total_bytes_out, bytes_out);
+    if (secret_id > 0 && secret_id < ext_secret_metrics_cap) {
+      __sync_fetch_and_add (&ext_secret_metrics[secret_id].bytes_out, bytes_out);
+    }
+  }
+  pthread_rwlock_unlock (&ext_secret_lock);
+}
+
 static int ext_mkdirs_for_file (const char *path) {
   if (!path || !*path) {
     return 0;
@@ -355,12 +444,21 @@ static int ext_persist_locked (void) {
     return -1;
   }
 
-  fprintf (f, "v1\n");
+  fprintf (f, "v2\t%lld\t%lld\t%lld\t%d\n",
+           ext_atomic_load_ll (&ext_total_bytes_in),
+           ext_atomic_load_ll (&ext_total_bytes_out),
+           ext_atomic_load_ll (&ext_total_connections),
+           ext_secret_next_id);
   int i;
   for (i = 0; i < ext_secret_cnt; i++) {
     struct ext_secret_entry *E = &ext_secrets[i];
-    fprintf (f, "%s\t%d\t%lld\t%lld\t%lld\t%s\n",
-             E->hex, E->enabled, E->expires_at, E->created_at, E->updated_at, E->label);
+    struct ext_secret_metric *M = (E->id > 0 && E->id < ext_secret_metrics_cap) ? &ext_secret_metrics[E->id] : NULL;
+    long long bytes_in = M ? ext_atomic_load_ll (&M->bytes_in) : 0;
+    long long bytes_out = M ? ext_atomic_load_ll (&M->bytes_out) : 0;
+    long long connections = M ? ext_atomic_load_ll (&M->connections) : 0;
+    fprintf (f, "%s\t%d\t%lld\t%lld\t%lld\t%d\t%lld\t%lld\t%lld\t%s\n",
+             E->hex, E->enabled, E->expires_at, E->created_at, E->updated_at,
+             E->id, bytes_in, bytes_out, connections, E->label);
   }
   fflush (f);
   fsync (fileno (f));
@@ -377,6 +475,12 @@ static int ext_add_locked (const unsigned char secret[16], const char *label, lo
   int idx = ext_find_idx_locked (secret);
   long long now = ext_now_sec();
   if (idx >= 0) {
+    if (ext_secrets[idx].id <= 0) {
+      if (ext_metrics_reserve_locked (ext_secret_next_id) < 0) {
+        return -1;
+      }
+      ext_secrets[idx].id = ext_secret_next_id++;
+    }
     if (fail_if_exists) {
       return -1;
     }
@@ -396,9 +500,14 @@ static int ext_add_locked (const unsigned char secret[16], const char *label, lo
   }
   struct ext_secret_entry *E = &ext_secrets[ext_secret_cnt++];
   memset (E, 0, sizeof (*E));
+  if (ext_metrics_reserve_locked (ext_secret_next_id) < 0) {
+    ext_secret_cnt--;
+    return -1;
+  }
   memcpy (E->secret, secret, 16);
   ext_secret16_to_hex (secret, E->hex);
   ext_sanitize_label (label, E->label);
+  E->id = ext_secret_next_id++;
   E->enabled = enabled ? 1 : 0;
   E->created_at = now;
   E->updated_at = now;
@@ -437,28 +546,84 @@ int tcp_rpcs_load_secrets_state (void) {
   char *line = NULL;
   size_t cap = 0;
   ssize_t n;
+  int have_totals = 0;
+  long long loaded_total_in = 0;
+  long long loaded_total_out = 0;
+  long long loaded_total_conn = 0;
+
   while ((n = getline (&line, &cap, f)) >= 0) {
     if (n <= 1 || line[0] == '#') {
+      continue;
+    }
+    if (!strncmp (line, "v2", 2)) {
+      char *saveptr = NULL;
+      (void) strtok_r (line, "\t\r\n", &saveptr); // v2
+      char *total_in_s = strtok_r (NULL, "\t\r\n", &saveptr);
+      char *total_out_s = strtok_r (NULL, "\t\r\n", &saveptr);
+      char *total_conn_s = strtok_r (NULL, "\t\r\n", &saveptr);
+      char *next_id_s = strtok_r (NULL, "\t\r\n", &saveptr);
+      if (total_in_s && total_out_s && total_conn_s) {
+        loaded_total_in = atoll (total_in_s);
+        loaded_total_out = atoll (total_out_s);
+        loaded_total_conn = atoll (total_conn_s);
+        have_totals = 1;
+      }
+      if (next_id_s) {
+        int parsed_next = atoi (next_id_s);
+        if (parsed_next > ext_secret_next_id) {
+          ext_secret_next_id = parsed_next;
+        }
+      }
       continue;
     }
     if (!strncmp (line, "v1", 2)) {
       continue;
     }
+
     char *saveptr = NULL;
     char *hex = strtok_r (line, "\t\r\n", &saveptr);
     char *enabled_s = strtok_r (NULL, "\t\r\n", &saveptr);
     char *expires_s = strtok_r (NULL, "\t\r\n", &saveptr);
     char *created_s = strtok_r (NULL, "\t\r\n", &saveptr);
     char *updated_s = strtok_r (NULL, "\t\r\n", &saveptr);
+    char *col6 = strtok_r (NULL, "\t\r\n", &saveptr);
+    char *col7 = strtok_r (NULL, "\t\r\n", &saveptr);
+    char *col8 = strtok_r (NULL, "\t\r\n", &saveptr);
+    char *col9 = strtok_r (NULL, "\t\r\n", &saveptr);
     char *label = strtok_r (NULL, "\t\r\n", &saveptr);
     if (!hex || !enabled_s || !expires_s || !created_s || !updated_s) {
       continue;
     }
+
+    int parsed_id = 0;
+    long long bytes_in = 0;
+    long long bytes_out = 0;
+    long long connections = 0;
+    if (col6 && col7 && col8 && col9) {
+      parsed_id = atoi (col6);
+      bytes_in = atoll (col7);
+      bytes_out = atoll (col8);
+      connections = atoll (col9);
+    } else {
+      label = col6;
+    }
+
     unsigned char secret[16];
     if (ext_secret16_from_hex (hex, secret) < 0) {
       continue;
     }
+
     int idx = ext_find_idx_locked (secret);
+    if (parsed_id > 0) {
+      int i;
+      for (i = 0; i < ext_secret_cnt; i++) {
+        if (i != idx && ext_secrets[i].id == parsed_id) {
+          parsed_id = 0;
+          break;
+        }
+      }
+    }
+
     if (idx >= 0) {
       struct ext_secret_entry *E = &ext_secrets[idx];
       E->enabled = atoi (enabled_s) ? 1 : 0;
@@ -466,8 +631,27 @@ int tcp_rpcs_load_secrets_state (void) {
       E->created_at = atoll (created_s);
       E->updated_at = atoll (updated_s);
       ext_sanitize_label (label ? label : "", E->label);
+      if (parsed_id > 0) {
+        E->id = parsed_id;
+      } else if (E->id <= 0) {
+        E->id = ext_secret_next_id++;
+      }
+      if (E->id > 0) {
+        if (ext_metrics_reserve_locked (E->id) < 0) {
+          continue;
+        }
+        if (col6 && col7 && col8 && col9) {
+          ext_secret_metrics[E->id].bytes_in = bytes_in;
+          ext_secret_metrics[E->id].bytes_out = bytes_out;
+          ext_secret_metrics[E->id].connections = connections;
+        }
+        if (E->id >= ext_secret_next_id) {
+          ext_secret_next_id = E->id + 1;
+        }
+      }
       continue;
     }
+
     if (ext_reserve_locked (ext_secret_cnt + 1) < 0) {
       break;
     }
@@ -480,9 +664,55 @@ int tcp_rpcs_load_secrets_state (void) {
     E->created_at = atoll (created_s);
     E->updated_at = atoll (updated_s);
     ext_sanitize_label (label ? label : "", E->label);
+    if (parsed_id > 0) {
+      E->id = parsed_id;
+    } else {
+      E->id = ext_secret_next_id++;
+    }
+    if (E->id > 0) {
+      if (ext_metrics_reserve_locked (E->id) < 0) {
+        ext_secret_cnt--;
+        break;
+      }
+      if (col6 && col7 && col8 && col9) {
+        ext_secret_metrics[E->id].bytes_in = bytes_in;
+        ext_secret_metrics[E->id].bytes_out = bytes_out;
+        ext_secret_metrics[E->id].connections = connections;
+      }
+      if (E->id >= ext_secret_next_id) {
+        ext_secret_next_id = E->id + 1;
+      }
+    }
   }
   free (line);
   fclose (f);
+
+  if (have_totals) {
+    ext_total_bytes_in = loaded_total_in;
+    ext_total_bytes_out = loaded_total_out;
+    ext_total_connections = loaded_total_conn;
+  } else {
+    long long sum_in = 0;
+    long long sum_out = 0;
+    long long sum_conn = 0;
+    int i;
+    for (i = 0; i < ext_secret_cnt; i++) {
+      int id = ext_secrets[i].id;
+      if (id <= 0 || id >= ext_secret_metrics_cap) {
+        continue;
+      }
+      sum_in += ext_secret_metrics[id].bytes_in;
+      sum_out += ext_secret_metrics[id].bytes_out;
+      sum_conn += ext_secret_metrics[id].connections;
+    }
+    ext_total_bytes_in = sum_in;
+    ext_total_bytes_out = sum_out;
+    ext_total_connections = sum_conn;
+  }
+
+  if (ext_secret_next_id < 1) {
+    ext_secret_next_id = 1;
+  }
   pthread_rwlock_unlock (&ext_secret_lock);
   return 0;
 }
@@ -505,7 +735,7 @@ int tcp_rpcs_active_secret_count (long long now) {
   return n;
 }
 
-static int ext_snapshot_active_secrets (long long now, unsigned char **secrets, int *count) {
+static int ext_snapshot_active_secrets (long long now, struct ext_active_secret **secrets, int *count) {
   *secrets = NULL;
   *count = 0;
 
@@ -519,7 +749,7 @@ static int ext_snapshot_active_secrets (long long now, unsigned char **secrets, 
     return 0;
   }
 
-  unsigned char *tmp = malloc (16 * n);
+  struct ext_active_secret *tmp = malloc (sizeof (*tmp) * n);
   if (!tmp) {
     pthread_rwlock_unlock (&ext_secret_lock);
     return -1;
@@ -530,7 +760,8 @@ static int ext_snapshot_active_secrets (long long now, unsigned char **secrets, 
     if (!ext_is_active_locked (&ext_secrets[i], now)) {
       continue;
     }
-    memcpy (tmp + 16 * j, ext_secrets[i].secret, 16);
+    memcpy (tmp[j].secret, ext_secrets[i].secret, 16);
+    tmp[j].id = ext_secrets[i].id;
     j++;
   }
   pthread_rwlock_unlock (&ext_secret_lock);
@@ -891,7 +1122,13 @@ static int ext_http_append_status_json (struct ext_strbuf *B) {
   long long now = ext_now_sec();
   int total = tcp_rpcs_total_secret_count();
   int active = tcp_rpcs_active_secret_count (now);
-  return ext_sb_appendf (B, "{\"ok\":true,\"total\":%d,\"active\":%d,\"now\":%lld}", total, active, now);
+  long long bytes_in = ext_atomic_load_ll (&ext_total_bytes_in);
+  long long bytes_out = ext_atomic_load_ll (&ext_total_bytes_out);
+  long long connections = ext_atomic_load_ll (&ext_total_connections);
+  return ext_sb_appendf (B,
+                         "{\"ok\":true,\"total\":%d,\"active\":%d,\"now\":%lld,"
+                         "\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld}",
+                         total, active, now, bytes_in, bytes_out, bytes_in + bytes_out, connections);
 }
 
 static int ext_http_append_list_json (struct ext_strbuf *B) {
@@ -908,17 +1145,66 @@ static int ext_http_append_list_json (struct ext_strbuf *B) {
       pthread_rwlock_unlock (&ext_secret_lock);
       return -1;
     }
+    struct ext_secret_metric *M = (E->id > 0 && E->id < ext_secret_metrics_cap) ? &ext_secret_metrics[E->id] : NULL;
+    long long bytes_in = M ? ext_atomic_load_ll (&M->bytes_in) : 0;
+    long long bytes_out = M ? ext_atomic_load_ll (&M->bytes_out) : 0;
+    long long connections = M ? ext_atomic_load_ll (&M->connections) : 0;
     if (ext_sb_appendf (B,
                         "{\"secret\":\"%s\",\"enabled\":%s,\"active\":%s,"
-                        "\"expires\":%lld,\"created\":%lld,\"updated\":%lld,\"label\":\"%s\"}",
+                        "\"expires\":%lld,\"created\":%lld,\"updated\":%lld,\"id\":%d,"
+                        "\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld,"
+                        "\"label\":\"%s\"}",
                         E->hex, E->enabled ? "true" : "false", active ? "true" : "false",
-                        E->expires_at, E->created_at, E->updated_at, E->label) < 0) {
+                        E->expires_at, E->created_at, E->updated_at, E->id,
+                        bytes_in, bytes_out, bytes_in + bytes_out, connections, E->label) < 0) {
       pthread_rwlock_unlock (&ext_secret_lock);
       return -1;
     }
   }
   pthread_rwlock_unlock (&ext_secret_lock);
   return ext_sb_appendf (B, "]}");
+}
+
+static int ext_http_append_stats_json (struct ext_strbuf *B) {
+  long long now = ext_now_sec();
+  long long bytes_in = ext_atomic_load_ll (&ext_total_bytes_in);
+  long long bytes_out = ext_atomic_load_ll (&ext_total_bytes_out);
+  long long connections = ext_atomic_load_ll (&ext_total_connections);
+
+  if (ext_sb_appendf (B,
+                      "{\"ok\":true,\"now\":%lld,"
+                      "\"totals\":{\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld},"
+                      "\"secrets\":{\"total\":%d,\"active\":%d,\"items\":[",
+                      now, bytes_in, bytes_out, bytes_in + bytes_out, connections,
+                      tcp_rpcs_total_secret_count (), tcp_rpcs_active_secret_count (now)) < 0) {
+    return -1;
+  }
+
+  pthread_rwlock_rdlock (&ext_secret_lock);
+  int i;
+  for (i = 0; i < ext_secret_cnt; i++) {
+    struct ext_secret_entry *E = &ext_secrets[i];
+    int active = ext_is_active_locked (E, now);
+    struct ext_secret_metric *M = (E->id > 0 && E->id < ext_secret_metrics_cap) ? &ext_secret_metrics[E->id] : NULL;
+    long long s_in = M ? ext_atomic_load_ll (&M->bytes_in) : 0;
+    long long s_out = M ? ext_atomic_load_ll (&M->bytes_out) : 0;
+    long long s_conn = M ? ext_atomic_load_ll (&M->connections) : 0;
+    if (i && ext_sb_appendf (B, ",") < 0) {
+      pthread_rwlock_unlock (&ext_secret_lock);
+      return -1;
+    }
+    if (ext_sb_appendf (B,
+                        "{\"secret\":\"%s\",\"label\":\"%s\",\"id\":%d,\"enabled\":%s,\"active\":%s,"
+                        "\"bytes_in\":%lld,\"bytes_out\":%lld,\"bytes_total\":%lld,\"connections\":%lld}",
+                        E->hex, E->label, E->id,
+                        E->enabled ? "true" : "false", active ? "true" : "false",
+                        s_in, s_out, s_in + s_out, s_conn) < 0) {
+      pthread_rwlock_unlock (&ext_secret_lock);
+      return -1;
+    }
+  }
+  pthread_rwlock_unlock (&ext_secret_lock);
+  return ext_sb_appendf (B, "]}}");
 }
 
 static void ext_admin_handle_line (int fd, char *line) {
@@ -961,10 +1247,27 @@ static void ext_admin_handle_line (int fd, char *line) {
   }
   if (!strcasecmp (cmd, "STATUS")) {
     long long now = ext_now_sec();
+    long long bytes_in = ext_atomic_load_ll (&ext_total_bytes_in);
+    long long bytes_out = ext_atomic_load_ll (&ext_total_bytes_out);
+    long long connections = ext_atomic_load_ll (&ext_total_connections);
     char out[256];
-    int n = snprintf (out, sizeof (out), "OK total=%d active=%d now=%lld\n",
-                      tcp_rpcs_total_secret_count(), tcp_rpcs_active_secret_count (now), now);
+    int n = snprintf (out, sizeof (out),
+                      "OK total=%d active=%d now=%lld bytes_in=%lld bytes_out=%lld bytes_total=%lld connections=%lld\n",
+                      tcp_rpcs_total_secret_count(), tcp_rpcs_active_secret_count (now), now,
+                      bytes_in, bytes_out, bytes_in + bytes_out, connections);
     ext_write_all (fd, out, n);
+    return;
+  }
+  if (!strcasecmp (cmd, "STATS")) {
+    struct ext_strbuf B = {};
+    if (ext_http_append_stats_json (&B) < 0) {
+      ext_sb_free (&B);
+      ext_admin_send_err (fd, "oom");
+      return;
+    }
+    ext_write_all (fd, B.s, (int) B.len);
+    ext_write_all (fd, "\n", 1);
+    ext_sb_free (&B);
     return;
   }
   if (!strcasecmp (cmd, "LIST")) {
@@ -975,13 +1278,23 @@ static void ext_admin_handle_line (int fd, char *line) {
     for (i = 0; i < ext_secret_cnt; i++) {
       active += ext_is_active_locked (&ext_secrets[i], now);
     }
-    int n = snprintf (out, sizeof (out), "OK total=%d active=%d\n", ext_secret_cnt, active);
+    long long bytes_in = ext_atomic_load_ll (&ext_total_bytes_in);
+    long long bytes_out = ext_atomic_load_ll (&ext_total_bytes_out);
+    long long connections = ext_atomic_load_ll (&ext_total_connections);
+    int n = snprintf (out, sizeof (out),
+                      "OK total=%d active=%d bytes_in=%lld bytes_out=%lld bytes_total=%lld connections=%lld\n",
+                      ext_secret_cnt, active, bytes_in, bytes_out, bytes_in + bytes_out, connections);
     ext_write_all (fd, out, n);
     for (i = 0; i < ext_secret_cnt; i++) {
       struct ext_secret_entry *E = &ext_secrets[i];
+      struct ext_secret_metric *M = (E->id > 0 && E->id < ext_secret_metrics_cap) ? &ext_secret_metrics[E->id] : NULL;
+      long long s_in = M ? ext_atomic_load_ll (&M->bytes_in) : 0;
+      long long s_out = M ? ext_atomic_load_ll (&M->bytes_out) : 0;
+      long long s_conn = M ? ext_atomic_load_ll (&M->connections) : 0;
       n = snprintf (out, sizeof (out),
-                    "secret=%s enabled=%d expires=%lld created=%lld updated=%lld label=%s\n",
-                    E->hex, E->enabled, E->expires_at, E->created_at, E->updated_at, E->label);
+                    "secret=%s id=%d enabled=%d expires=%lld created=%lld updated=%lld bytes_in=%lld bytes_out=%lld bytes_total=%lld connections=%lld label=%s\n",
+                    E->hex, E->id, E->enabled, E->expires_at, E->created_at, E->updated_at,
+                    s_in, s_out, s_in + s_out, s_conn, E->label);
       ext_write_all (fd, out, n);
     }
     pthread_rwlock_unlock (&ext_secret_lock);
@@ -1142,6 +1455,18 @@ static void ext_admin_handle_http (int fd, char *req) {
   if (!strcmp (method, "GET") && !strcmp (path, "/v1/status")) {
     struct ext_strbuf B = {};
     if (ext_http_append_status_json (&B) < 0) {
+      ext_sb_free (&B);
+      ext_http_send_error (fd, 500, "oom");
+      return;
+    }
+    ext_http_send_json (fd, 200, B.s);
+    ext_sb_free (&B);
+    return;
+  }
+
+  if (!strcmp (method, "GET") && !strcmp (path, "/v1/stats")) {
+    struct ext_strbuf B = {};
+    if (ext_http_append_stats_json (&B) < 0) {
       ext_sb_free (&B);
       ext_http_send_error (fd, 500, "oom");
       return;
@@ -2242,6 +2567,9 @@ int tcp_rpcs_ext_alarm (connection_job_t C) {
 }
 
 int tcp_rpcs_ext_init_accepted (connection_job_t C) {
+  struct tcp_rpc_data *D = TCP_RPC_DATA (C);
+  D->extra_int = 0;
+  D->extra_int2 = 0;
   job_timer_insert (C, precise_now + 10);
   return tcp_rpcs_init_accepted_nohs (C);
 }
@@ -2401,19 +2729,21 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
         unsigned char expected_random[32];
         unsigned char matched_secret[16];
+        int matched_secret_id = 0;
         int have_match = 0;
 
-        unsigned char *active_secrets = NULL;
+        struct ext_active_secret *active_secrets = NULL;
         int active_secret_cnt = 0;
         if (ext_snapshot_active_secrets (ext_now_sec(), &active_secrets, &active_secret_cnt) < 0) {
           RETURN_TLS_ERROR(info);
         }
         int secret_id;
         for (secret_id = 0; secret_id < active_secret_cnt; secret_id++) {
-          unsigned char *secret = active_secrets + 16 * secret_id;
+          unsigned char *secret = active_secrets[secret_id].secret;
           sha256_hmac (secret, 16, client_hello, len, expected_random);
           if (memcmp (expected_random, client_random, 28) == 0) {
             memcpy (matched_secret, secret, 16);
+            matched_secret_id = active_secrets[secret_id].id;
             have_match = 1;
             break;
           }
@@ -2449,6 +2779,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         assert (rwm_skip_data (&c->in, len) == len);
         c->flags |= C_IS_TLS;
         c->left_tls_packet_length = -1;
+        ext_metrics_attach_secret_to_connection (C, matched_secret_id);
 
         int encrypted_size = get_domain_server_hello_encrypted_size (info);
         int response_size = 127 + 6 + 5 + encrypted_size;
@@ -2541,8 +2872,9 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
       struct aes_key_data key_data;
       
       int ok = 0;
+      int matched_secret_id = 0;
       int have_active_secrets = 0;
-      unsigned char *active_secrets = NULL;
+      struct ext_active_secret *active_secrets = NULL;
       int active_secret_cnt = 0;
       if (ext_snapshot_active_secrets (ext_now_sec(), &active_secrets, &active_secret_cnt) < 0) {
         return (-1 << 28);
@@ -2554,7 +2886,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
       for (secret_id = 0; secret_id < attempts; secret_id++) {
         if (have_active_secrets) {
           memcpy (k, random_header + 8, 32);
-          memcpy (k + 32, active_secrets + 16 * secret_id, 16);
+          memcpy (k + 32, active_secrets[secret_id].secret, 16);
           sha256 (k, 48, key_data.read_key);
         } else {
           memcpy (key_data.read_key, random_header + 8, 32);
@@ -2606,6 +2938,10 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
           int target = *(short *)(random_header + 60);
           D->extra_int4 = target;
+          if (have_active_secrets) {
+            matched_secret_id = active_secrets[secret_id].id;
+          }
+          ext_metrics_attach_secret_to_connection (C, matched_secret_id);
           vkprintf (1, "tcp opportunistic encryption mode detected, tag = %08x, target=%d\n", tag, target);
           ok = 1;
           break;

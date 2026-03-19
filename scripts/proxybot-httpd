@@ -299,6 +299,8 @@ class Handler(BaseHTTPRequestHandler):
         sub, full_path = self._route()
         if sub == "/health":
             rc, out = run_proxyctl(["bot", "health"])
+        elif sub == "/stats":
+            rc, out = run_proxyctl(["stats"])
         elif sub == "/secrets":
             rc, out = run_proxyctl(["secret", "list"])
         else:

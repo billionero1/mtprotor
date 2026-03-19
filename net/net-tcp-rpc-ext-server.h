@@ -35,6 +35,7 @@ int tcp_rpcs_load_secrets_state (void);
 int tcp_rpcs_start_admin_server (const char *socket_path, const char *token);
 int tcp_rpcs_active_secret_count (long long now);
 int tcp_rpcs_total_secret_count (void);
+void tcp_rpcs_note_connection_traffic (connection_job_t C, int bytes_in, int bytes_out);
 
 void tcp_rpc_add_proxy_domain (const char *domain);
 

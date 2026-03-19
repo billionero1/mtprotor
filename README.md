@@ -95,6 +95,7 @@ proxyctl service restart
 proxyctl service logs
 proxyctl service update
 proxyctl health
+proxyctl stats
 proxyctl bot api show
 proxyctl bot api status
 proxyctl bot api restart
@@ -115,6 +116,8 @@ proxyctl link --secret <hex32>
 ```bash
 proxyctl secret list
 proxyctl secret list --table
+proxyctl secret stats
+proxyctl secret stats <secret_hex32>
 proxyctl secret add <secret_hex_or_dd_or_ee> --label user123
 proxyctl secret disable <secret_hex>
 proxyctl secret enable <secret_hex>
@@ -218,6 +221,7 @@ proxyctl bot api restart
 
 HTTP contract (all JSON):
 - `GET <base_path>/health`
+- `GET <base_path>/stats`
 - `GET <base_path>/secrets`
 - `POST <base_path>/issue` body: `{"label":"user_1001","days":30}`
 - `POST <base_path>/enable` body: `{"secret":"<hex32>"}`
@@ -292,6 +296,7 @@ Auth:
 
 Endpoints:
 - `GET /v1/status`
+- `GET /v1/stats`
 - `GET /v1/secrets`
 - `POST /v1/secrets`
 - `POST /v1/secrets/expire_disable`
@@ -299,7 +304,12 @@ Endpoints:
 - `PATCH /v1/secrets/{secret}/enable`
 - `PATCH /v1/secrets/{secret}/disable`
 
-Legacy line-protocol includes: `PING`, `STATUS`, `LIST`, `ADD`, `REMOVE`, `ENABLE`, `DISABLE`, `EXPIRE_DISABLE`.
+Legacy line-protocol includes: `PING`, `STATUS`, `STATS`, `LIST`, `ADD`, `REMOVE`, `ENABLE`, `DISABLE`, `EXPIRE_DISABLE`.
+
+Traffic fields:
+- `/v1/status`: global counters `bytes_in`, `bytes_out`, `bytes_total`, `connections`
+- `/v1/stats`: global totals + per-secret traffic list
+- `/v1/secrets`: per-secret fields `bytes_in`, `bytes_out`, `bytes_total`, `connections`
 
 Accepted secret formats:
 - plain: `<32 hex>`

@@ -1939,12 +1939,28 @@ int check_conn_buffers (connection_job_t c) {
 
 // invoked in NET-CPU context!
 int mtfront_data_received (connection_job_t c, int bytes_received) {
+  if (CONN_INFO(c)->type != &ct_tcp_rpc_ext_server_mtfront) {
+    return 0;
+  }
+  struct tcp_rpc_data *D = TCP_RPC_DATA (c);
+  int prev = D->extra_int;
+  if (prev < 0 || prev > bytes_received) {
+    prev = 0;
+  }
+  int delta = bytes_received - prev;
+  D->extra_int = bytes_received;
+  if (delta > 0) {
+    tcp_rpcs_note_connection_traffic (c, delta, 0);
+  }
   // check_conn_buffers (c);
   return 0;
 }
 
 // invoked in NET-CPU context!
 int mtfront_data_sent (connection_job_t c, int bytes_sent) {
+  if (CONN_INFO(c)->type == &ct_tcp_rpc_ext_server_mtfront && bytes_sent > 0) {
+    tcp_rpcs_note_connection_traffic (c, 0, bytes_sent);
+  }
   // lru_insert_conn (c);
   return 0;
 }
