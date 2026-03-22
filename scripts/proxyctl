@@ -382,6 +382,29 @@ inbound_env_value() {
   fi
 }
 
+inbound_uid_value() {
+  local envf="$1"
+  local uid=""
+  uid="$(inbound_env_value "$envf" INBOUND_UID "")"
+  uid="${uid,,}"
+  if [[ "$uid" =~ ^[0-9a-f]{32}$ ]]; then
+    echo "$uid"
+    return 0
+  fi
+
+  # Backfill UID for legacy inbound env files (best effort, root only).
+  if [[ "${EUID:-$(id -u)}" -eq 0 && -r "$envf" && -w "$envf" ]]; then
+    uid="$(rand_inbound_uid)"
+    printf '\nINBOUND_UID=%s\n' "$uid" >> "$envf"
+    chown root:mtproxy "$envf" 2>/dev/null || true
+    chmod 0640 "$envf" 2>/dev/null || true
+    echo "$uid"
+    return 0
+  fi
+
+  echo "-"
+}
+
 list_inbound_names() {
   local -a extra=()
   if [[ -r "$DEFAULT_ENV_FILE" || -r "$INBOUNDS_DIR/1.env" ]]; then
@@ -1236,7 +1259,7 @@ cmd_inbound_list_table() {
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     envf="$(inbound_env_file "$name")"
-    uid="$(inbound_env_value "$envf" INBOUND_UID "-")"
+    uid="$(inbound_uid_value "$envf")"
     svc="$(inbound_service_name "$name")"
     port="$(inbound_env_value "$envf" CLIENT_PORT "443")"
     mode="$(inbound_env_value "$envf" SECRET_PREFIX "dd")"
