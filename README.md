@@ -11,6 +11,7 @@ Production-focused MTProxy fork with **runtime hot reload of secrets/users** (no
 - Persistent state on disk (`secrets.tsv`) with restore on service start.
 - Local admin API over Unix socket (HTTP/JSON + legacy line protocol).
 - `proxyctl` CLI and interactive terminal menu.
+- Built-in multi-inbound management (create/edit/remove/select runtime instances).
 - Optional Bot HTTP Bridge (`host + base_path + login/password + api_key`) for panel-like bot integration.
 - One-command installer for Ubuntu 24.04.
 
@@ -18,6 +19,8 @@ Production-focused MTProxy fork with **runtime hot reload of secrets/users** (no
 - Hot reload is currently **single-process mode only**.
 - `--admin-socket` is intentionally blocked together with `--slaves` to avoid secret desync between worker processes.
 - This does **not** mean one secret only. You can manage many secrets/users in one process.
+- Multi-inbound mode runs multiple single-process runtimes in parallel (one runtime per inbound).
+- Each inbound has isolated socket/state/statistics. Removing one inbound does not touch others.
 
 ## Quick Install (Ubuntu 24.04)
 ```bash
@@ -42,6 +45,7 @@ Installer validation notes:
 
 After install:
 - service: `mtproxy-fork.service`
+- service templates: `mtproxy-fork@.service` (additional inbounds)
 - binary: `/usr/local/bin/mtproto-proxy-fork`
 - runtime launcher: `/usr/local/bin/mtproxy-fork-run`
 - CLI: `/usr/local/bin/dogctl` (compat: `/usr/local/bin/proxyctl`)
@@ -56,6 +60,7 @@ After install:
 - bot credentials cache: `/etc/mtproxy-fork/bot-access.env`
 - bot http credentials cache: `/etc/mtproxy-fork/bot-http.env`
 - expire timer: `mtproxy-fork-expire-sync.timer` (disables expired users)
+- expire timer template: `mtproxy-fork-expire-sync@.timer`
 - bot api service: `mtproxy-fork-bot-api.service`
 
 ## Telegram Link Format (iOS)
@@ -99,6 +104,12 @@ proxyctl stats
 proxyctl bot api show
 proxyctl bot api status
 proxyctl bot api restart
+proxyctl inbound list --table
+proxyctl inbound create edge8443 --port 8443 --mode ee --tls-domain www.google.com
+proxyctl inbound set edge8443 public-host 1.2.3.4
+proxyctl inbound set edge8443 client-port 8444
+proxyctl inbound remove edge8443 --yes
+proxyctl inbound console edge8443
 ```
 
 `proxyctl service status` is compact by default (active status, PID, memory, CPU, listener, secret counters).
@@ -161,8 +172,26 @@ Menu includes:
 - bot SSH settings (change login/password/allow-from)
 - bot HTTP API settings (change base_path/login/password/api_key/allow-from)
 - force run expired-user disable
+- inbound selector (auto shown if more than one inbound exists)
+- inbound manager: create/edit/remove/switch inbound
 
 When link-related params change, default links are reprinted.
+
+## Multi-Inbound Model (x-ui style)
+- `default` inbound uses:
+  - env: `/etc/default/mtproxy-fork`
+  - service: `mtproxy-fork.service`
+  - state: `/var/lib/mtproxy-fork/secrets.tsv`
+- Additional inbound `<name>` uses:
+  - env: `/etc/mtproxy-fork/inbounds.d/<name>.env`
+  - service: `mtproxy-fork@<name>.service`
+  - timer: `mtproxy-fork-expire-sync@<name>.timer`
+  - state: `/var/lib/mtproxy-fork/<name>/secrets.tsv`
+
+Practical notes:
+- Inbounds are isolated by design (secrets/stats/runtime socket are separate).
+- `dogmenu` opens selector automatically when more than one inbound exists.
+- If only one inbound exists, `dogmenu` opens runtime console directly (old behavior).
 
 ## Config Management (`/etc/default/mtproxy-fork`)
 Show current runtime config:

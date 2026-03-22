@@ -3,8 +3,11 @@ set -euo pipefail
 
 SERVICE_NAME="mtproxy-fork"
 UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
+UNIT_TEMPLATE_FILE="/etc/systemd/system/mtproxy-fork@.service"
 EXPIRE_SYNC_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.service"
 EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
+EXPIRE_SYNC_TEMPLATE_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync@.service"
+EXPIRE_SYNC_TEMPLATE_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync@.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 RUNNER_PATH="/usr/local/bin/mtproxy-fork-run"
 CTL_PATH="/usr/local/bin/proxyctl"
@@ -42,7 +45,8 @@ if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
 fi
 
 systemctl disable --now "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-fork-expire-sync.service mtproxy-fork-bot-api.service 2>/dev/null || true
-rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" "$BOT_HTTP_UNIT_FILE"
+systemctl disable --now 'mtproxy-fork@*.service' 'mtproxy-fork-expire-sync@*.timer' 'mtproxy-fork-expire-sync@*.service' 2>/dev/null || true
+rm -f "$UNIT_FILE" "$UNIT_TEMPLATE_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" "$EXPIRE_SYNC_TEMPLATE_SERVICE_FILE" "$EXPIRE_SYNC_TEMPLATE_TIMER_FILE" "$BOT_HTTP_UNIT_FILE"
 systemctl daemon-reload
 
 rm -f "$BIN_PATH" "$RUNNER_PATH" "$CTL_PATH" "$MENU_PATH" "$DOG_MENU_PATH" "$DOG_CTL_PATH" "$DISPATCH_PATH" "$BOT_SETUP_PATH" "$BOT_HTTPD_PATH" "$BOT_HTTP_SETUP_PATH"

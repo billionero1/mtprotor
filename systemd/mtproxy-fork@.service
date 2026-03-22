@@ -1,0 +1,23 @@
+[Unit]
+Description=MTProxy Fork (hot secret reload) [%i]
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/mtproxy-fork/inbounds.d/%i.env
+
+[Service]
+Type=simple
+User=mtproxy
+Group=mtproxy
+WorkingDirectory=/var/lib/mtproxy-fork/%i
+Environment=MTPROXY_ENV_FILE=/etc/mtproxy-fork/inbounds.d/%i.env
+EnvironmentFile=-/etc/mtproxy-fork/inbounds.d/%i.env
+ExecStart=/usr/local/bin/mtproxy-fork-run
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=262144
+NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

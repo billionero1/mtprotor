@@ -8,11 +8,15 @@ INSTALL_DIR="${MTPROXY_INSTALL_DIR:-/opt/mtproxy-fork-src}"
 SERVICE_NAME="mtproxy-fork"
 
 CONF_DIR="/etc/mtproxy-fork"
+INBOUNDS_DIR="$CONF_DIR/inbounds.d"
 DATA_DIR="/var/lib/mtproxy-fork"
 ENV_FILE="/etc/default/mtproxy-fork"
 UNIT_FILE="/etc/systemd/system/mtproxy-fork.service"
+UNIT_TEMPLATE_FILE="/etc/systemd/system/mtproxy-fork@.service"
 EXPIRE_SYNC_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.service"
 EXPIRE_SYNC_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync.timer"
+EXPIRE_SYNC_TEMPLATE_SERVICE_FILE="/etc/systemd/system/mtproxy-fork-expire-sync@.service"
+EXPIRE_SYNC_TEMPLATE_TIMER_FILE="/etc/systemd/system/mtproxy-fork-expire-sync@.timer"
 BIN_PATH="/usr/local/bin/mtproto-proxy-fork"
 RUNNER_PATH="/usr/local/bin/mtproxy-fork-run"
 CTL_PATH="/usr/local/bin/proxyctl"
@@ -383,7 +387,8 @@ apt-get install -y --no-install-recommends \
 cleanup_old() {
   say "[2/9] Removing old services/processes/files..."
   systemctl disable --now mtprotor.service MTProxy.service "$SERVICE_NAME" mtproxy-fork-expire-sync.timer mtproxy-fork-expire-sync.service 2>/dev/null || true
-  rm -f "$UNIT_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
+  systemctl disable --now 'mtproxy-fork@*.service' 'mtproxy-fork-expire-sync@*.timer' 'mtproxy-fork-expire-sync@*.service' 2>/dev/null || true
+  rm -f "$UNIT_FILE" "$UNIT_TEMPLATE_FILE" "$EXPIRE_SYNC_SERVICE_FILE" "$EXPIRE_SYNC_TIMER_FILE" "$EXPIRE_SYNC_TEMPLATE_SERVICE_FILE" "$EXPIRE_SYNC_TEMPLATE_TIMER_FILE" /etc/systemd/system/mtprotor.service /etc/systemd/system/MTProxy.service
   pkill -f '/usr/local/bin/mtprotor|/usr/local/bin/mtproto-proxy-fork|/usr/local/bin/mtproto-proxy' 2>/dev/null || true
   rm -rf /etc/mtprotor /var/lib/mtprotor /run/mtprotor "$CONF_DIR" "$DATA_DIR"
   systemctl disable --now mtproxy-fork-bot-api.service 2>/dev/null || true
@@ -418,6 +423,7 @@ if ! id -u mtproxy >/dev/null 2>&1; then
     || useradd --system --home-dir "$DATA_DIR" --create-home --shell /sbin/nologin mtproxy
 fi
 install -d -m 0750 -o root -g mtproxy "$CONF_DIR"
+install -d -m 0750 -o root -g mtproxy "$INBOUNDS_DIR"
 install -d -m 0750 -o mtproxy -g mtproxy "$DATA_DIR"
 
 download_to() {
@@ -470,8 +476,11 @@ chown mtproxy:mtproxy "$STATE_FILE"
 chmod 0640 "$STATE_FILE"
 
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
+install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork@.service" "$UNIT_TEMPLATE_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.service" "$EXPIRE_SYNC_SERVICE_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync.timer" "$EXPIRE_SYNC_TIMER_FILE"
+install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync@.service" "$EXPIRE_SYNC_TEMPLATE_SERVICE_FILE"
+install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork-expire-sync@.timer" "$EXPIRE_SYNC_TEMPLATE_TIMER_FILE"
 install -m 0755 "$INSTALL_DIR/scripts/mtproxy-fork-run" "$RUNNER_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/proxyctl" "$CTL_PATH"
 install -m 0755 "$INSTALL_DIR/scripts/dogctl" "$DOG_CTL_PATH"

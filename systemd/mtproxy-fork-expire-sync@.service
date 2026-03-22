@@ -1,0 +1,14 @@
+[Unit]
+Description=MTProxy Fork Expire Sync [%i]
+After=mtproxy-fork@%i.service
+Wants=mtproxy-fork@%i.service
+ConditionPathExists=/etc/mtproxy-fork/inbounds.d/%i.env
+
+[Service]
+Type=oneshot
+Environment=MTPROXY_ENV_FILE=/etc/mtproxy-fork/inbounds.d/%i.env
+Environment=MTPROXY_SERVICE=mtproxy-fork@%i
+Environment=MTPROXY_SOCKET=/var/lib/mtproxy-fork/%i/admin.sock
+Environment=MTPROXY_CURRENT_INBOUND=%i
+Environment=MTPROXY_RUNTIME_ID=bulldog-%i
+ExecStart=/usr/local/bin/proxyctl secret expire-disable
