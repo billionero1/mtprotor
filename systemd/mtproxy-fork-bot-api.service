@@ -7,8 +7,8 @@ ConditionPathExists=/etc/mtproxy-fork/bot-http.env
 
 [Service]
 Type=simple
-User=mtproxy
-Group=mtproxy
+User=root
+Group=root
 EnvironmentFile=-/etc/default/mtproxy-fork
 EnvironmentFile=-/etc/mtproxy-fork/bot-http.env
 ExecStart=/usr/local/bin/proxybot-httpd
@@ -16,10 +16,8 @@ Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
+ProtectSystem=no
 ProtectHome=true
-ReadOnlyPaths=/etc/default/mtproxy-fork /etc/mtproxy-fork/bot-http.env
-ReadWritePaths=/var/lib/mtproxy-fork
 
 [Install]
 WantedBy=multi-user.target

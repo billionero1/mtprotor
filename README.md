@@ -249,14 +249,28 @@ proxyctl bot api restart
 ```
 
 HTTP contract (all JSON):
-- `GET <base_path>/health`
-- `GET <base_path>/stats`
-- `GET <base_path>/secrets`
-- `POST <base_path>/issue` body: `{"label":"user_1001","days":30}`
-- `POST <base_path>/renew` body: `{"secret":"<hex32>","days":30}` or `{"secret":"<hex32>","expires":<unix_ts>}`
-- `POST <base_path>/enable` body: `{"secret":"<hex32>"}`
-- `POST <base_path>/disable` body: `{"secret":"<hex32>"}`
-- `POST <base_path>/revoke` body: `{"secret":"<hex32>"}`
+- Global/single-node compatible:
+  - `GET <base_path>/health[?inbound_id=<id>]`
+  - `GET <base_path>/stats[?inbound_id=<id>]`
+  - `GET <base_path>/secrets[?inbound_id=<id>]`
+  - `POST <base_path>/issue` body: `{"label":"user_1001","days":30,"inbound_id":1}` (`inbound_id` optional, default `1`)
+  - `POST <base_path>/renew` body: `{"secret":"<hex32>","days":30,"inbound_id":1}` or `{"secret":"<hex32>","expires":<unix_ts>,"inbound_id":1}`
+  - `POST <base_path>/enable` body: `{"secret":"<hex32>","inbound_id":1}`
+  - `POST <base_path>/disable` body: `{"secret":"<hex32>","inbound_id":1}`
+  - `POST <base_path>/revoke` body: `{"secret":"<hex32>","inbound_id":1}`
+  - `POST <base_path>/update` body: `{"secret":"<hex32>","label":"new_label","expires":<unix_ts>,"enabled":true,"inbound_id":1}` (any subset of editable fields)
+  - `POST <base_path>/expire-disable` body: `{"inbound_id":1}` or empty
+- Multi-inbound discovery/management:
+  - `GET <base_path>/inbounds` (list all inbounds and configs)
+  - `GET <base_path>/inbounds/<id>` (single inbound info)
+  - `GET <base_path>/inbounds/<id>/health`
+  - `GET <base_path>/inbounds/<id>/stats`
+  - `GET <base_path>/inbounds/<id>/secrets`
+  - `GET <base_path>/inbounds/<id>/link`
+  - `POST <base_path>/inbounds` body: `{"port":8443,"stats_port":8888,"public_host":"1.2.3.4","mode":"ee","tls_domain":"www.google.com"}`
+  - `PATCH <base_path>/inbounds/<id>` body: `{"client_port":9443,"public_host":"x.x.x.x","stealth_mode":"dd","tls_domain":"off","bootstrap_secret":"<hex32>"}` (any subset)
+  - `DELETE <base_path>/inbounds/<id>`
+  - `POST <base_path>/inbounds/<id>/issue|renew|enable|disable|revoke|update|expire-disable` (same bodies as global endpoints, without `inbound_id`)
 
 Required auth headers:
 - `Authorization: Basic base64(login:password)`
@@ -273,6 +287,7 @@ Security defaults:
 - per-IP rate limit
 - temporary block on repeated auth failures
 - local proxy runtime API remains unix-socket only
+- bot HTTP bridge can manage inbounds (create/update/delete), so protect host/allow-from/credentials as production secrets
 
 SSH forced-command remains available as fallback:
 ```bash

@@ -5,13 +5,19 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+
+DEFAULT_ENV_FILE = "/etc/default/mtproxy-fork"
+INBOUNDS_DIR = "/etc/mtproxy-fork/inbounds.d"
+DEFAULT_DATA_DIR = "/var/lib/mtproxy-fork"
 
 
 def getenv_str(name: str, default: str) -> str:
@@ -62,6 +68,121 @@ def parse_allow_from(raw: str) -> List[ipaddress._BaseNetwork]:
                 item = f"{item}/32"
         nets.append(ipaddress.ip_network(item, strict=False))
     return nets
+
+
+def normalize_inbound_id(v: object) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if re.fullmatch(r"[1-9][0-9]*", s):
+        return s
+    return None
+
+
+def inbound_env_file(inbound_id: str) -> str:
+    if inbound_id == "1":
+        alt = os.path.join(INBOUNDS_DIR, "1.env")
+        if os.path.exists(alt):
+            return alt
+        return DEFAULT_ENV_FILE
+    return os.path.join(INBOUNDS_DIR, f"{inbound_id}.env")
+
+
+def inbound_exists(inbound_id: str) -> bool:
+    if inbound_id == "1":
+        return os.path.exists(DEFAULT_ENV_FILE) or os.path.exists(os.path.join(INBOUNDS_DIR, "1.env"))
+    return os.path.exists(inbound_env_file(inbound_id))
+
+
+def inbound_service_name(inbound_id: str) -> str:
+    if inbound_id == "1":
+        return "mtproxy-fork"
+    return f"mtproxy-fork@{inbound_id}"
+
+
+def inbound_socket_path(inbound_id: str) -> str:
+    if inbound_id == "1":
+        return f"{DEFAULT_DATA_DIR}/admin.sock"
+    return f"{DEFAULT_DATA_DIR}/{inbound_id}/admin.sock"
+
+
+def inbound_state_file(inbound_id: str) -> str:
+    if inbound_id == "1":
+        return f"{DEFAULT_DATA_DIR}/secrets.tsv"
+    return f"{DEFAULT_DATA_DIR}/{inbound_id}/secrets.tsv"
+
+
+def inbound_runtime_id(inbound_id: str) -> str:
+    return f"bulldog-{inbound_id}"
+
+
+def list_inbound_ids() -> List[str]:
+    ids: set[str] = set()
+    if inbound_exists("1"):
+        ids.add("1")
+    if os.path.isdir(INBOUNDS_DIR):
+        for name in os.listdir(INBOUNDS_DIR):
+            if not name.endswith(".env"):
+                continue
+            inbound_id = name[:-4]
+            if normalize_inbound_id(inbound_id):
+                ids.add(inbound_id)
+    return sorted(ids, key=lambda x: int(x))
+
+
+def read_env_file(path: str) -> Dict[str, str]:
+    cfg: Dict[str, str] = {}
+    if not os.path.exists(path):
+        return cfg
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                cfg[key.strip()] = value.strip().strip('"').strip("'")
+    except Exception:
+        return {}
+    return cfg
+
+
+def systemctl_value(unit: str, key: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", "-p", key, "--value", unit],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return "unknown"
+    if proc.returncode != 0:
+        return "unknown"
+    return (proc.stdout or "").strip() or "unknown"
+
+
+def inbound_info(inbound_id: str) -> Dict[str, object]:
+    env_file = inbound_env_file(inbound_id)
+    cfg = read_env_file(env_file)
+    service = inbound_service_name(inbound_id)
+    unit = f"{service}.service"
+    active = systemctl_value(unit, "ActiveState")
+    substate = systemctl_value(unit, "SubState")
+    return {
+        "id": int(inbound_id),
+        "service": service,
+        "status": f"{active}/{substate}",
+        "client_port": cfg.get("CLIENT_PORT", "443"),
+        "stats_port": cfg.get("STATS_PORT", "8888"),
+        "public_host": cfg.get("PUBLIC_HOST", ""),
+        "stealth_mode": cfg.get("SECRET_PREFIX", "dd") or "plain",
+        "tls_domain": cfg.get("TLS_DOMAIN", "") or "off",
+        "admin_socket": cfg.get("ADMIN_SOCKET", inbound_socket_path(inbound_id)),
+        "state_file": cfg.get("STATE_FILE", inbound_state_file(inbound_id)),
+        "env_file": env_file,
+    }
 
 
 LISTEN = getenv_str("BOT_HTTP_LISTEN", "0.0.0.0")
@@ -172,15 +293,29 @@ def parse_basic_auth(header: str) -> Optional[Tuple[str, str]]:
     return user, password
 
 
-def run_proxyctl(args: List[str]) -> Tuple[int, str]:
+def run_proxyctl(args: List[str], inbound_id: Optional[str] = None) -> Tuple[int, str]:
     cmd = ["/usr/local/bin/proxyctl"] + args
     env = os.environ.copy()
     env["NO_COLOR"] = "1"
+
+    if inbound_id is not None:
+        normalized = normalize_inbound_id(inbound_id)
+        if not normalized:
+            return 2, json.dumps({"ok": False, "error": "invalid inbound_id"})
+        if not inbound_exists(normalized):
+            return 2, json.dumps({"ok": False, "error": f"inbound not found: {normalized}"})
+        env["MTPROXY_CURRENT_INBOUND"] = normalized
+        env["MTPROXY_INBOUND_SELECTED"] = "1"
+        env["MTPROXY_ENV_FILE"] = inbound_env_file(normalized)
+        env["MTPROXY_SERVICE"] = inbound_service_name(normalized)
+        env["MTPROXY_SOCKET"] = inbound_socket_path(normalized)
+        env["MTPROXY_RUNTIME_ID"] = inbound_runtime_id(normalized)
+
     proc = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=25,
         env=env,
         check=False,
     )
@@ -193,8 +328,30 @@ def run_proxyctl(args: List[str]) -> Tuple[int, str]:
     return proc.returncode, json.dumps({"ok": proc.returncode == 0})
 
 
+def parse_payload(rc: int, out: str) -> Dict[str, object]:
+    try:
+        payload = json.loads(out)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+    return {"ok": rc == 0, "raw": out}
+
+
+def is_hex32(v: object) -> bool:
+    s = str(v).strip().lower()
+    return bool(re.fullmatch(r"[0-9a-f]{32}", s))
+
+
+def as_int(v: object) -> Optional[int]:
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "BulldogBotHTTP/1.0"
+    server_version = "BulldogBotHTTP/1.1"
 
     def log_message(self, fmt: str, *args):
         logging.info("%s - %s", self.client_address[0], fmt % args)
@@ -262,14 +419,16 @@ class Handler(BaseHTTPRequestHandler):
 
         return ip
 
-    def _route(self) -> Tuple[str, str]:
-        path = urlparse(self.path).path
+    def _route(self) -> Tuple[str, str, Dict[str, List[str]]]:
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
         if path == BASE_PATH:
-            return "/", path
+            return "/", path, query
         if path.startswith(BASE_PATH + "/"):
             sub = path[len(BASE_PATH):]
-            return sub, path
-        return "", path
+            return sub, path, query
+        return "", path, query
 
     def _read_json(self) -> dict:
         raw_len = self.headers.get("Content-Length", "")
@@ -291,41 +450,260 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("json body must be object")
         return obj
 
+    def _resolve_inbound_id(self, query: Dict[str, List[str]], body: Optional[dict], default_id: str = "1") -> Tuple[Optional[str], Optional[str]]:
+        raw = None
+        if body is not None and "inbound_id" in body:
+            raw = body.get("inbound_id")
+        elif "inbound_id" in query and query["inbound_id"]:
+            raw = query["inbound_id"][0]
+        if raw is None:
+            return default_id, None
+        normalized = normalize_inbound_id(raw)
+        if not normalized:
+            return None, "invalid inbound_id"
+        if not inbound_exists(normalized):
+            return None, f"inbound not found: {normalized}"
+        return normalized, None
+
+    def _run_and_reply(self, ip: str, method: str, full_path: str, args: List[str], inbound_id: Optional[str] = None) -> None:
+        rc, out = run_proxyctl(args, inbound_id=inbound_id)
+        payload = parse_payload(rc, out)
+        code = HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST
+        logging.info("ip=%s method=%s path=%s inbound=%s rc=%s", ip, method, full_path, inbound_id or "-", rc)
+        self._json(code, payload)
+
+    def _handle_secret_action(self, action: str, body: dict, inbound_id: str) -> Tuple[int, Dict[str, object]]:
+        if action == "issue":
+            label = str(body.get("label", "")).strip()
+            if not label:
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "label is required"}
+            args = ["bot", "issue", label]
+            if "days" in body:
+                days = as_int(body.get("days"))
+                if days is None or days < 1 or days > 3650:
+                    return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "days must be integer 1..3650"}
+                args += ["--days", str(days)]
+            rc, out = run_proxyctl(args, inbound_id=inbound_id)
+            return (HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST), parse_payload(rc, out)
+
+        if action == "renew":
+            secret = str(body.get("secret", "")).strip().lower()
+            if not is_hex32(secret):
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "secret must be hex32"}
+            if "days" in body and "expires" in body:
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "use either days or expires"}
+            args = ["bot", "renew", secret]
+            if "days" in body:
+                days = as_int(body.get("days"))
+                if days is None or days < 1 or days > 3650:
+                    return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "days must be integer 1..3650"}
+                args += ["--days", str(days)]
+            if "expires" in body:
+                expires = as_int(body.get("expires"))
+                if expires is None or expires < 1:
+                    return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "expires must be unix timestamp"}
+                args += ["--expires", str(expires)]
+            rc, out = run_proxyctl(args, inbound_id=inbound_id)
+            return (HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST), parse_payload(rc, out)
+
+        if action in ("enable", "disable", "revoke"):
+            secret = str(body.get("secret", "")).strip().lower()
+            if not is_hex32(secret):
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "secret must be hex32"}
+            rc, out = run_proxyctl(["bot", action, secret], inbound_id=inbound_id)
+            return (HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST), parse_payload(rc, out)
+
+        if action == "update":
+            secret = str(body.get("secret", "")).strip().lower()
+            if not is_hex32(secret):
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "secret must be hex32"}
+            args = ["secret", "update", secret]
+            changed = 0
+            if "label" in body:
+                args += ["--label", str(body.get("label", ""))]
+                changed += 1
+            if "expires" in body:
+                expires = as_int(body.get("expires"))
+                if expires is None or expires < 1:
+                    return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "expires must be unix timestamp"}
+                args += ["--expires", str(expires)]
+                changed += 1
+            if "enabled" in body:
+                enabled = body.get("enabled")
+                if isinstance(enabled, bool):
+                    args.append("--enable" if enabled else "--disable")
+                    changed += 1
+                else:
+                    return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "enabled must be boolean"}
+            if changed == 0:
+                return HTTPStatus.BAD_REQUEST, {"ok": False, "error": "nothing to update"}
+            rc, out = run_proxyctl(args, inbound_id=inbound_id)
+            return (HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST), parse_payload(rc, out)
+
+        if action == "expire-disable":
+            rc, out = run_proxyctl(["secret", "expire-disable"], inbound_id=inbound_id)
+            return (HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST), parse_payload(rc, out)
+
+        return HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"}
+
     def do_GET(self):
         ip = self._check_guardrails()
         if not ip:
             return
 
-        sub, full_path = self._route()
-        if sub == "/health":
-            rc, out = run_proxyctl(["bot", "health"])
-        elif sub == "/stats":
-            rc, out = run_proxyctl(["stats"])
-        elif sub == "/secrets":
-            rc, out = run_proxyctl(["secret", "list"])
-        else:
+        sub, full_path, query = self._route()
+
+        if sub == "/inbounds":
+            ids = list_inbound_ids()
+            payload = {
+                "ok": True,
+                "primary_inbound_id": 1,
+                "count": len(ids),
+                "inbounds": [inbound_info(i) for i in ids],
+            }
+            self._json(HTTPStatus.OK, payload)
+            return
+
+        parts = sub.strip("/").split("/") if sub else []
+        if len(parts) >= 2 and parts[0] == "inbounds":
+            inbound_id = normalize_inbound_id(parts[1])
+            if not inbound_id:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid inbound_id"})
+                return
+            if not inbound_exists(inbound_id):
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"inbound not found: {inbound_id}"})
+                return
+
+            if len(parts) == 2:
+                self._json(HTTPStatus.OK, {"ok": True, "inbound": inbound_info(inbound_id)})
+                return
+
+            action = parts[2]
+            if action == "health":
+                self._run_and_reply(ip, "GET", full_path, ["bot", "health"], inbound_id=inbound_id)
+                return
+            if action == "stats":
+                self._run_and_reply(ip, "GET", full_path, ["stats"], inbound_id=inbound_id)
+                return
+            if action == "secrets":
+                self._run_and_reply(ip, "GET", full_path, ["secret", "list"], inbound_id=inbound_id)
+                return
+            if action == "link":
+                self._run_and_reply(ip, "GET", full_path, ["link"], inbound_id=inbound_id)
+                return
+
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
             return
 
-        try:
-            payload = json.loads(out)
-            if not isinstance(payload, dict):
-                raise ValueError()
-        except Exception:
-            payload = {"ok": rc == 0, "raw": out}
+        inbound_id, err = self._resolve_inbound_id(query, None, default_id="1")
+        if err:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": err})
+            return
 
-        code = HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST
-        logging.info("ip=%s method=GET path=%s rc=%s", ip, full_path, rc)
-        self._json(code, payload)
+        if sub == "/health":
+            self._run_and_reply(ip, "GET", full_path, ["bot", "health"], inbound_id=inbound_id)
+        elif sub == "/stats":
+            self._run_and_reply(ip, "GET", full_path, ["stats"], inbound_id=inbound_id)
+        elif sub == "/secrets":
+            self._run_and_reply(ip, "GET", full_path, ["secret", "list"], inbound_id=inbound_id)
+        else:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
 
     def do_POST(self):
         ip = self._check_guardrails()
         if not ip:
             return
 
-        sub, full_path = self._route()
-        if sub not in ("/issue", "/renew", "/enable", "/disable", "/revoke"):
+        sub, full_path, query = self._route()
+        try:
+            body = self._read_json()
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+
+        if sub == "/inbounds":
+            port = as_int(body.get("port"))
+            if port is None or port < 1 or port > 65535:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "port must be 1..65535"})
+                return
+
+            args = ["inbound", "create", "--port", str(port)]
+            stats_port = body.get("stats_port")
+            if stats_port is not None:
+                p = as_int(stats_port)
+                if p is None or p < 1 or p > 65535:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "stats_port must be 1..65535"})
+                    return
+                args += ["--stats-port", str(p)]
+
+            if body.get("public_host"):
+                args += ["--public-host", str(body["public_host"]).strip()]
+            if body.get("mode"):
+                args += ["--mode", str(body["mode"]).strip()]
+            if body.get("tls_domain"):
+                args += ["--tls-domain", str(body["tls_domain"]).strip()]
+            if body.get("bootstrap_secret"):
+                args += ["--bootstrap-secret", str(body["bootstrap_secret"]).strip()]
+
+            rc, out = run_proxyctl(args)
+            payload = parse_payload(rc, out)
+            m = re.search(r"inbound created: id=(\d+)", out)
+            if m:
+                created_id = m.group(1)
+                payload["created_inbound_id"] = int(created_id)
+                if inbound_exists(created_id):
+                    payload["inbound"] = inbound_info(created_id)
+            code = HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST
+            logging.info("ip=%s method=POST path=%s rc=%s", ip, full_path, rc)
+            self._json(code, payload)
+            return
+
+        parts = sub.strip("/").split("/") if sub else []
+        if len(parts) >= 3 and parts[0] == "inbounds":
+            inbound_id = normalize_inbound_id(parts[1])
+            if not inbound_id:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid inbound_id"})
+                return
+            if not inbound_exists(inbound_id):
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"inbound not found: {inbound_id}"})
+                return
+            action = parts[2]
+            status, payload = self._handle_secret_action(action, body, inbound_id)
+            logging.info("ip=%s method=POST path=%s inbound=%s status=%s", ip, full_path, inbound_id, status)
+            self._json(status, payload)
+            return
+
+        inbound_id, err = self._resolve_inbound_id(query, body, default_id="1")
+        if err:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": err})
+            return
+
+        action = sub.lstrip("/")
+        if action in ("issue", "renew", "enable", "disable", "revoke", "update", "expire-disable"):
+            status, payload = self._handle_secret_action(action, body, inbound_id)
+            logging.info("ip=%s method=POST path=%s inbound=%s status=%s", ip, full_path, inbound_id, status)
+            self._json(status, payload)
+            return
+
+        self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+
+    def do_PATCH(self):
+        ip = self._check_guardrails()
+        if not ip:
+            return
+
+        sub, full_path, _query = self._route()
+        parts = sub.strip("/").split("/") if sub else []
+        if len(parts) != 2 or parts[0] != "inbounds":
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+            return
+
+        inbound_id = normalize_inbound_id(parts[1])
+        if not inbound_id:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid inbound_id"})
+            return
+        if not inbound_exists(inbound_id):
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"inbound not found: {inbound_id}"})
             return
 
         try:
@@ -334,57 +712,74 @@ class Handler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
             return
 
-        if sub == "/issue":
-            label = str(body.get("label", "")).strip()
-            if not label:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "label is required"})
-                return
-            args = ["bot", "issue", label]
-            if "days" in body:
-                days = body.get("days")
-                if not isinstance(days, int) or days < 1 or days > 3650:
-                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "days must be integer 1..3650"})
-                    return
-                args += ["--days", str(days)]
-        elif sub == "/renew":
-            secret = str(body.get("secret", "")).strip().lower()
-            if len(secret) != 32 or any(c not in "0123456789abcdef" for c in secret):
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "secret must be hex32"})
-                return
-            if "days" in body and "expires" in body:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "use either days or expires"})
-                return
-            args = ["bot", "renew", secret]
-            if "days" in body:
-                days = body.get("days")
-                if not isinstance(days, int) or days < 1 or days > 3650:
-                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "days must be integer 1..3650"})
-                    return
-                args += ["--days", str(days)]
-            if "expires" in body:
-                expires = body.get("expires")
-                if not isinstance(expires, int) or expires < 1:
-                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "expires must be unix timestamp"})
-                    return
-                args += ["--expires", str(expires)]
-        else:
-            secret = str(body.get("secret", "")).strip().lower()
-            if len(secret) != 32 or any(c not in "0123456789abcdef" for c in secret):
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "secret must be hex32"})
-                return
-            cmd = sub[1:]
-            args = ["bot", cmd, secret]
+        key_map = {
+            "client_port": "client-port",
+            "stats_port": "stats-port",
+            "public_host": "public-host",
+            "bootstrap_secret": "bootstrap-secret",
+            "stealth_mode": "stealth-mode",
+            "tls_domain": "tls-domain",
+            "client-port": "client-port",
+            "stats-port": "stats-port",
+            "public-host": "public-host",
+            "bootstrap-secret": "bootstrap-secret",
+            "stealth-mode": "stealth-mode",
+            "tls-domain": "tls-domain",
+        }
 
-        rc, out = run_proxyctl(args)
-        try:
-            payload = json.loads(out)
-            if not isinstance(payload, dict):
-                raise ValueError()
-        except Exception:
-            payload = {"ok": rc == 0, "raw": out}
+        updates = []
+        for key, value in body.items():
+            mapped = key_map.get(key)
+            if not mapped:
+                continue
+            updates.append((mapped, value))
 
+        if not updates:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "no supported fields to update"})
+            return
+
+        results = []
+        all_ok = True
+        for key, value in updates:
+            rc, out = run_proxyctl(["inbound", "set", inbound_id, key, str(value)], inbound_id=None)
+            payload = parse_payload(rc, out)
+            results.append({"key": key, "ok": rc == 0, "response": payload})
+            if rc != 0:
+                all_ok = False
+                break
+
+        status = HTTPStatus.OK if all_ok else HTTPStatus.BAD_REQUEST
+        resp = {
+            "ok": all_ok,
+            "inbound_id": int(inbound_id),
+            "results": results,
+        }
+        if all_ok and inbound_exists(inbound_id):
+            resp["inbound"] = inbound_info(inbound_id)
+
+        logging.info("ip=%s method=PATCH path=%s inbound=%s ok=%s", ip, full_path, inbound_id, all_ok)
+        self._json(status, resp)
+
+    def do_DELETE(self):
+        ip = self._check_guardrails()
+        if not ip:
+            return
+
+        sub, full_path, _query = self._route()
+        parts = sub.strip("/").split("/") if sub else []
+        if len(parts) != 2 or parts[0] != "inbounds":
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
+            return
+
+        inbound_id = normalize_inbound_id(parts[1])
+        if not inbound_id:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid inbound_id"})
+            return
+
+        rc, out = run_proxyctl(["inbound", "remove", inbound_id, "--yes"], inbound_id=None)
+        payload = parse_payload(rc, out)
         code = HTTPStatus.OK if rc == 0 else HTTPStatus.BAD_REQUEST
-        logging.info("ip=%s method=POST path=%s rc=%s", ip, full_path, rc)
+        logging.info("ip=%s method=DELETE path=%s inbound=%s rc=%s", ip, full_path, inbound_id, rc)
         self._json(code, payload)
 
 
