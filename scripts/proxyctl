@@ -20,13 +20,13 @@ fi
 
 inbound_name_valid() {
   local name="${1:-}"
-  [[ "$name" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]]
+  [[ "$name" =~ ^[1-9][0-9]*$ ]]
 }
 
 inbound_name_from_env_file() {
   local file="${1:-$DEFAULT_ENV_FILE}"
-  if [[ "$file" == "$DEFAULT_ENV_FILE" ]]; then
-    echo "default"
+  if [[ "$file" == "$DEFAULT_ENV_FILE" || "$file" == "$INBOUNDS_DIR/1.env" ]]; then
+    echo "1"
     return 0
   fi
   if [[ "$file" == "$INBOUNDS_DIR/"*.env ]]; then
@@ -41,8 +41,12 @@ inbound_name_from_env_file() {
 }
 
 inbound_env_file() {
-  local name="${1:-default}"
-  if [[ "$name" == "default" ]]; then
+  local name="${1:-1}"
+  if [[ "$name" == "1" ]]; then
+    if [[ -r "$INBOUNDS_DIR/1.env" ]]; then
+      echo "$INBOUNDS_DIR/1.env"
+      return 0
+    fi
     echo "$DEFAULT_ENV_FILE"
   else
     echo "$INBOUNDS_DIR/$name.env"
@@ -50,8 +54,8 @@ inbound_env_file() {
 }
 
 inbound_service_name() {
-  local name="${1:-default}"
-  if [[ "$name" == "default" ]]; then
+  local name="${1:-1}"
+  if [[ "$name" == "1" ]]; then
     echo "$DEFAULT_SERVICE_NAME"
   else
     echo "mtproxy-fork@$name"
@@ -59,8 +63,8 @@ inbound_service_name() {
 }
 
 inbound_data_dir() {
-  local name="${1:-default}"
-  if [[ "$name" == "default" ]]; then
+  local name="${1:-1}"
+  if [[ "$name" == "1" ]]; then
     echo "$DEFAULT_DATA_DIR"
   else
     echo "$DEFAULT_DATA_DIR/$name"
@@ -68,22 +72,18 @@ inbound_data_dir() {
 }
 
 inbound_socket_path() {
-  local name="${1:-default}"
+  local name="${1:-1}"
   echo "$(inbound_data_dir "$name")/admin.sock"
 }
 
 inbound_state_file() {
-  local name="${1:-default}"
+  local name="${1:-1}"
   echo "$(inbound_data_dir "$name")/secrets.tsv"
 }
 
 inbound_runtime_id() {
-  local name="${1:-default}"
-  if [[ "$name" == "default" ]]; then
-    echo "bulldog-runtime"
-  else
-    echo "bulldog-$name"
-  fi
+  local name="${1:-1}"
+  echo "bulldog-$name"
 }
 
 if [[ -z "$CURRENT_INBOUND" ]]; then
@@ -202,10 +202,10 @@ Usage:
   proxyctl config set domain-camouflage <domain|off>
 
   proxyctl inbound list [--table]
-  proxyctl inbound console [<name>]
-  proxyctl inbound create <name> --port <1..65535> [--stats-port <1..65535>] [--public-host <host_or_ip>] [--mode <plain|dd|ee>] [--tls-domain <domain|off>] [--bootstrap-secret <hex32>]
-  proxyctl inbound set <name> <client-port|stats-port|public-host|bootstrap-secret|stealth-mode|tls-domain> <value>
-  proxyctl inbound remove <name> [--yes]
+  proxyctl inbound console [<id>]
+  proxyctl inbound create --port <1..65535> [--stats-port <1..65535>] [--public-host <host_or_ip>] [--mode <plain|dd|ee>] [--tls-domain <domain|off>] [--bootstrap-secret <hex32>]
+  proxyctl inbound set <id> <client-port|stats-port|public-host|bootstrap-secret|stealth-mode|tls-domain> <value>
+  proxyctl inbound remove <id> [--yes]
 
   proxyctl secret list [--table]
   proxyctl secret stats [<secret_hex>]
@@ -345,8 +345,8 @@ inbound_env_value() {
 
 list_inbound_names() {
   local -a extra=()
-  if [[ -r "$DEFAULT_ENV_FILE" ]]; then
-    echo "default"
+  if [[ -r "$DEFAULT_ENV_FILE" || -r "$INBOUNDS_DIR/1.env" ]]; then
+    echo "1"
   fi
   if [[ -d "$INBOUNDS_DIR" ]]; then
     local f n
@@ -354,11 +354,12 @@ list_inbound_names() {
       [[ -e "$f" ]] || continue
       n="$(basename "$f" .env)"
       inbound_name_valid "$n" || continue
+      [[ "$n" == "1" ]] && continue
       extra+=("$n")
     done
   fi
   if (( ${#extra[@]} > 0 )); then
-    printf '%s\n' "${extra[@]}" | sort
+    printf '%s\n' "${extra[@]}" | sort -n
   fi
 }
 
@@ -372,16 +373,16 @@ inbound_count() {
 
 inbound_exists() {
   local name="${1:-}"
-  if [[ "$name" == "default" ]]; then
-    [[ -r "$DEFAULT_ENV_FILE" ]]
+  if [[ "$name" == "1" ]]; then
+    [[ -r "$DEFAULT_ENV_FILE" || -r "$INBOUNDS_DIR/1.env" ]]
     return $?
   fi
   [[ -r "$(inbound_env_file "$name")" ]]
 }
 
 inbound_timer_name() {
-  local name="${1:-default}"
-  if [[ "$name" == "default" ]]; then
+  local name="${1:-1}"
+  if [[ "$name" == "1" ]]; then
     echo "mtproxy-fork-expire-sync.timer"
   else
     echo "mtproxy-fork-expire-sync@$name.timer"
@@ -389,8 +390,8 @@ inbound_timer_name() {
 }
 
 inbound_sync_service_name() {
-  local name="${1:-default}"
-  if [[ "$name" == "default" ]]; then
+  local name="${1:-1}"
+  if [[ "$name" == "1" ]]; then
     echo "mtproxy-fork-expire-sync.service"
   else
     echo "mtproxy-fork-expire-sync@$name.service"
@@ -1190,8 +1191,8 @@ cmd_config_set() {
 }
 
 cmd_inbound_list_table() {
-  printf '%-12s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
-    "INBOUND" "SERVICE" "PORT" "MODE" "TLS_DOMAIN" "STATUS" "SOCKET"
+  printf '%-6s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
+    "ID" "SERVICE" "PORT" "MODE" "TLS_DOMAIN" "STATUS" "SOCKET"
   local name envf svc port mode tls socket active substate status
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
@@ -1205,13 +1206,13 @@ cmd_inbound_list_table() {
     active="$(systemctl show -p ActiveState --value "$svc.service" 2>/dev/null || echo unknown)"
     substate="$(systemctl show -p SubState --value "$svc.service" 2>/dev/null || echo unknown)"
     status="$active/$substate"
-    printf '%-12s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
+    printf '%-6s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
       "$name" "$svc" "$port" "$mode" "$tls" "$status" "$socket"
   done < <(list_inbound_names)
 }
 
 pick_inbound_interactive() {
-  local prompt="${1:-Select inbound: }"
+  local prompt="${1:-Select inbound ID: }"
   local -a names=()
   local name idx choice
   while IFS= read -r name; do
@@ -1227,7 +1228,7 @@ pick_inbound_interactive() {
     return 0
   fi
   echo
-  echo "Available inbounds:"
+  echo "Available inbound IDs:"
   idx=1
   for name in "${names[@]}"; do
     local envf svc port mode tls active substate host
@@ -1240,7 +1241,7 @@ pick_inbound_interactive() {
     [[ -n "$tls" ]] || tls="off"
     active="$(systemctl show -p ActiveState --value "$svc.service" 2>/dev/null || echo unknown)"
     substate="$(systemctl show -p SubState --value "$svc.service" 2>/dev/null || echo unknown)"
-    printf '%d) %s  (%s:%s, mode=%s, tls=%s, %s/%s)\n' \
+    printf '%d) ID %s  (%s:%s, mode=%s, tls=%s, %s/%s)\n' \
       "$idx" "$name" "$host" "$port" "$mode" "$tls" "$active" "$substate"
     (( idx += 1 ))
   done
@@ -1255,30 +1256,26 @@ pick_inbound_interactive() {
 }
 
 cmd_inbound_console() {
-  local name="${1:-}"
-  if [[ -z "$name" ]]; then
+  local id="${1:-}"
+  if [[ -z "$id" ]]; then
     if [[ -t 0 ]]; then
-      name="$(pick_inbound_interactive "Select inbound to open: ")" || return 1
+      id="$(pick_inbound_interactive "Select inbound ID to open: ")" || return 1
     else
-      die "inbound name is required in non-interactive mode"
+      die "inbound id is required in non-interactive mode"
     fi
   fi
-  if ! inbound_exists "$name"; then
-    die "inbound not found: $name"
+  if ! inbound_name_valid "$id"; then
+    die "invalid inbound id: $id"
   fi
-  exec_for_inbound "$name" console
+  if ! inbound_exists "$id"; then
+    die "inbound not found: $id"
+  fi
+  exec_for_inbound "$id" console
 }
 
 cmd_inbound_create() {
   require_root
-  local name="${1:-}"
-  shift || true
-  [[ -n "$name" ]] || die "Usage: proxyctl inbound create <name> --port <1..65535> [--stats-port <1..65535>] [--public-host <host_or_ip>] [--mode <plain|dd|ee>] [--tls-domain <domain|off>] [--bootstrap-secret <hex32>]"
-  inbound_name_valid "$name" || die "inbound name must match ^[a-z0-9][a-z0-9_-]{0,31}$"
-  [[ "$name" != "default" ]] || die "default inbound already exists"
-  if inbound_exists "$name"; then
-    die "inbound already exists: $name"
-  fi
+  [[ $# -gt 0 ]] || die "Usage: proxyctl inbound create --port <1..65535> [--stats-port <1..65535>] [--public-host <host_or_ip>] [--mode <plain|dd|ee>] [--tls-domain <domain|off>] [--bootstrap-secret <hex32>]"
 
   local port=""
   local stats_port="8888"
@@ -1306,6 +1303,11 @@ cmd_inbound_create() {
     esac
   done
 
+  local id=2
+  while inbound_exists "$id"; do
+    id=$(( id + 1 ))
+  done
+
   [[ -n "$port" ]] || die "--port is required"
   require_port "$port" || die "invalid --port value"
   require_port "$stats_port" || die "invalid --stats-port value"
@@ -1330,7 +1332,7 @@ cmd_inbound_create() {
   local used_by
   used_by="$(port_used_by_other_inbound "$port" "" || true)"
   if [[ -n "$used_by" ]]; then
-    die "port $port is already configured by inbound '$used_by'"
+    die "port $port is already configured by inbound ID '$used_by'"
   fi
   if ss -ltn | awk '{print $4}' | grep -qE "(^|:)${port}$"; then
     die "port $port is already listening on this host"
@@ -1344,10 +1346,10 @@ cmd_inbound_create() {
   [[ -r "$timer_tmpl" ]] || die "missing $timer_tmpl (run: proxyctl runtime update)"
 
   local envf data_dir socket state tmp_env now
-  envf="$(inbound_env_file "$name")"
-  data_dir="$(inbound_data_dir "$name")"
-  socket="$(inbound_socket_path "$name")"
-  state="$(inbound_state_file "$name")"
+  envf="$(inbound_env_file "$id")"
+  data_dir="$(inbound_data_dir "$id")"
+  socket="$(inbound_socket_path "$id")"
+  state="$(inbound_state_file "$id")"
 
   install -d -m 0750 -o root -g mtproxy "$INBOUNDS_DIR"
   install -d -m 0750 -o mtproxy -g mtproxy "$data_dir"
@@ -1378,34 +1380,35 @@ ENV
   chmod 0640 "$state"
 
   systemctl daemon-reload
-  systemctl enable --now "$(inbound_service_name "$name").service"
-  systemctl enable --now "$(inbound_timer_name "$name")"
-  systemctl is-active --quiet "$(inbound_service_name "$name").service" || die "failed to start inbound service: $(inbound_service_name "$name").service"
+  systemctl enable --now "$(inbound_service_name "$id").service"
+  systemctl enable --now "$(inbound_timer_name "$id")"
+  systemctl is-active --quiet "$(inbound_service_name "$id").service" || die "failed to start inbound service: $(inbound_service_name "$id").service"
 
-  echo "inbound created: $name"
-  run_for_inbound "$name" link --secret "$bootstrap" --host "$host" --port "$port"
+  echo "inbound created: id=$id"
+  run_for_inbound "$id" link --secret "$bootstrap" --host "$host" --port "$port"
 }
 
 cmd_inbound_set() {
-  local name="${1:-}"
+  local id="${1:-}"
   local key="${2:-}"
   local value="${3:-}"
-  [[ -n "$name" && -n "$key" && -n "$value" ]] || die "Usage: proxyctl inbound set <name> <key> <value>"
-  if ! inbound_exists "$name"; then
-    die "inbound not found: $name"
+  [[ -n "$id" && -n "$key" && -n "$value" ]] || die "Usage: proxyctl inbound set <id> <key> <value>"
+  inbound_name_valid "$id" || die "invalid inbound id: $id"
+  if ! inbound_exists "$id"; then
+    die "inbound not found: $id"
   fi
-  run_for_inbound "$name" config set "$key" "$value"
+  run_for_inbound "$id" config set "$key" "$value"
 }
 
 cmd_inbound_remove() {
   require_root
-  local name="${1:-}"
+  local id="${1:-}"
   shift || true
-  [[ -n "$name" ]] || die "Usage: proxyctl inbound remove <name> [--yes]"
-  [[ "$name" != "default" ]] || die "default inbound cannot be removed"
-  inbound_name_valid "$name" || die "invalid inbound name"
-  if ! inbound_exists "$name"; then
-    die "inbound not found: $name"
+  [[ -n "$id" ]] || die "Usage: proxyctl inbound remove <id> [--yes]"
+  inbound_name_valid "$id" || die "invalid inbound id"
+  [[ "$id" != "1" ]] || die "inbound ID 1 cannot be removed"
+  if ! inbound_exists "$id"; then
+    die "inbound not found: $id"
   fi
 
   local yes=0
@@ -1421,7 +1424,7 @@ cmd_inbound_remove() {
       die "confirmation required (use --yes)"
     fi
     local answer=""
-    printf "Remove inbound '%s' with all its state/statistics? [y/N]: " "$name"
+    printf "Remove inbound ID '%s' with all its state/statistics? [y/N]: " "$id"
     IFS= read -r answer || true
     case "${answer,,}" in
       y|yes) ;;
@@ -1429,11 +1432,11 @@ cmd_inbound_remove() {
     esac
   fi
 
-  systemctl disable --now "$(inbound_timer_name "$name")" "$(inbound_sync_service_name "$name")" "$(inbound_service_name "$name").service" 2>/dev/null || true
-  rm -f "$(inbound_env_file "$name")"
-  rm -rf "$(inbound_data_dir "$name")"
+  systemctl disable --now "$(inbound_timer_name "$id")" "$(inbound_sync_service_name "$id")" "$(inbound_service_name "$id").service" 2>/dev/null || true
+  rm -f "$(inbound_env_file "$id")"
+  rm -rf "$(inbound_data_dir "$id")"
   systemctl daemon-reload
-  echo "inbound removed: $name"
+  echo "inbound removed: id=$id"
 }
 
 cmd_inbound() {
@@ -1452,17 +1455,14 @@ cmd_inbound() {
       cmd_inbound_console "${1:-}"
       ;;
     create)
-      local name="${1:-}"
-      [[ -n "$name" ]] || die "Usage: proxyctl inbound create <name> ..."
-      shift || true
-      cmd_inbound_create "$name" "$@"
+      cmd_inbound_create "$@"
       ;;
     set)
       cmd_inbound_set "$@"
       ;;
     remove|delete|rm)
       local name_rm="${1:-}"
-      [[ -n "$name_rm" ]] || die "Usage: proxyctl inbound remove <name> [--yes]"
+      [[ -n "$name_rm" ]] || die "Usage: proxyctl inbound remove <id> [--yes]"
       shift || true
       cmd_inbound_remove "$name_rm" "$@"
       ;;
@@ -2055,7 +2055,7 @@ menu_header() {
   echo "=========== $(paint "$C_BOLD" "$BRAND_CONSOLE") ==========="
   echo "Runtime   : $(paint "$C_BOLD" "$BRAND_NAME") ($(paint_state "$active" "$substate"))"
   echo "Node      : $BRAND_RUNTIME_ID  PID: $(paint "$C_CYAN" "$pid")"
-  echo "Inbound   : $(paint "$C_CYAN" "$CURRENT_INBOUND")  service: $SERVICE_NAME"
+  echo "Inbound ID: $(paint "$C_CYAN" "$CURRENT_INBOUND")  service: $SERVICE_NAME"
   echo "Endpoint  : ${host:-unknown}:$(paint "$C_CYAN" "$CLIENT_PORT")  listening: $(paint_bool "$listen")"
   echo "Stealth   : $(paint "$C_CYAN" "$stealth")"
   echo "TLS Cover : $(paint "$C_CYAN" "$tls_domain")"
@@ -2361,10 +2361,8 @@ menu_inbound_edit() {
 menu_inbound_create() {
   echo
   echo "-------- $(paint "$C_BOLD" "Create New Inbound") --------"
-  local name port stats host mode tls
-  printf "Inbound name (lowercase, e.g. edge8443): "
-  IFS= read -r name || true
-  [[ -n "$name" ]] || { warn "name is required"; return 1; }
+  echo "Inbound ID will be assigned automatically (next free ID: 2, 3, ...)."
+  local port stats host mode tls
   printf "Client port: "
   IFS= read -r port || true
   [[ -n "$port" ]] || { warn "port is required"; return 1; }
@@ -2379,7 +2377,7 @@ menu_inbound_create() {
   mode="${mode:-dd}"
   printf "TLS domain (empty=off): "
   IFS= read -r tls || true
-  run_safe cmd_inbound create "$name" --port "$port" --stats-port "$stats" --public-host "$host" --mode "$mode" --tls-domain "${tls:-off}"
+  run_safe cmd_inbound create --port "$port" --stats-port "$stats" --public-host "$host" --mode "$mode" --tls-domain "${tls:-off}"
 }
 
 menu_inbound_manage() {
@@ -2397,7 +2395,7 @@ menu_inbound_manage() {
     case "$ich" in
       1)
         local open_name=""
-        open_name="$(pick_inbound_interactive "Select inbound to open: ")" || { continue; }
+        open_name="$(pick_inbound_interactive "Select inbound ID to open: ")" || { continue; }
         exec_for_inbound "$open_name" console
         ;;
       2)
@@ -2405,14 +2403,14 @@ menu_inbound_manage() {
         ;;
       3)
         local edit_name=""
-        edit_name="$(pick_inbound_interactive "Select inbound to edit: ")" || { continue; }
+        edit_name="$(pick_inbound_interactive "Select inbound ID to edit: ")" || { continue; }
         run_safe menu_inbound_edit "$edit_name"
         ;;
       4)
         local rm_name=""
-        rm_name="$(pick_inbound_interactive "Select inbound to remove: ")" || { continue; }
-        if [[ "$rm_name" == "default" ]]; then
-          warn "default inbound cannot be removed"
+        rm_name="$(pick_inbound_interactive "Select inbound ID to remove: ")" || { continue; }
+        if [[ "$rm_name" == "1" ]]; then
+          warn "inbound ID 1 cannot be removed"
           continue
         fi
         run_safe cmd_inbound remove "$rm_name"
@@ -2433,7 +2431,7 @@ menu_inbound_manage() {
 console_entrypoint() {
   local total
   total="$(inbound_count)"
-  if [[ "$INBOUND_SELECTED" == "1" || "$CURRENT_INBOUND" != "default" && "$CURRENT_INBOUND" != "custom" ]] || (( total <= 1 )); then
+  if [[ "$INBOUND_SELECTED" == "1" ]] || (( total <= 1 )); then
     menu_cmd
     return 0
   fi
@@ -2450,7 +2448,7 @@ console_entrypoint() {
     case "$sel" in
       1)
         local target=""
-        target="$(pick_inbound_interactive "Select inbound to open: ")" || { continue; }
+        target="$(pick_inbound_interactive "Select inbound ID to open: ")" || { continue; }
         exec_for_inbound "$target" console
         ;;
       2)
@@ -2479,7 +2477,7 @@ menu_cmd() {
     echo "7) Update runtime from repo"
     echo
     echo "[Client Access]"
-    echo "8) Show default client links"
+    echo "8) Show client links (this inbound)"
     echo "9) Change client port (restart)"
     echo "10) Rotate bootstrap secret"
     echo "11) Change public host"
@@ -2594,7 +2592,7 @@ menu_cmd() {
         ;;
       22)
         local switch_name=""
-        switch_name="$(pick_inbound_interactive "Select inbound to open: ")" || { continue; }
+        switch_name="$(pick_inbound_interactive "Select inbound ID to open: ")" || { continue; }
         exec_for_inbound "$switch_name" console
         ;;
       23)
@@ -2602,14 +2600,14 @@ menu_cmd() {
         ;;
       24)
         local edit_name=""
-        edit_name="$(pick_inbound_interactive "Select inbound to edit: ")" || { continue; }
+        edit_name="$(pick_inbound_interactive "Select inbound ID to edit: ")" || { continue; }
         run_safe menu_inbound_edit "$edit_name"
         ;;
       25)
         local rm_name=""
-        rm_name="$(pick_inbound_interactive "Select inbound to remove: ")" || { continue; }
-        if [[ "$rm_name" == "default" ]]; then
-          warn "default inbound cannot be removed"
+        rm_name="$(pick_inbound_interactive "Select inbound ID to remove: ")" || { continue; }
+        if [[ "$rm_name" == "1" ]]; then
+          warn "inbound ID 1 cannot be removed"
           continue
         fi
         run_safe cmd_inbound remove "$rm_name"
