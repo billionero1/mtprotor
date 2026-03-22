@@ -1230,12 +1230,13 @@ cmd_config_set() {
 }
 
 cmd_inbound_list_table() {
-  printf '%-6s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
-    "ID" "SERVICE" "PORT" "MODE" "TLS_DOMAIN" "STATUS" "SOCKET"
-  local name envf svc port mode tls socket active substate status
+  printf '%-6s %-34s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
+    "ID" "UID" "SERVICE" "PORT" "MODE" "TLS_DOMAIN" "STATUS" "SOCKET"
+  local name envf uid svc port mode tls socket active substate status
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
     envf="$(inbound_env_file "$name")"
+    uid="$(inbound_env_value "$envf" INBOUND_UID "-")"
     svc="$(inbound_service_name "$name")"
     port="$(inbound_env_value "$envf" CLIENT_PORT "443")"
     mode="$(inbound_env_value "$envf" SECRET_PREFIX "dd")"
@@ -1245,8 +1246,8 @@ cmd_inbound_list_table() {
     active="$(systemctl show -p ActiveState --value "$svc.service" 2>/dev/null || echo unknown)"
     substate="$(systemctl show -p SubState --value "$svc.service" 2>/dev/null || echo unknown)"
     status="$active/$substate"
-    printf '%-6s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
-      "$name" "$svc" "$port" "$mode" "$tls" "$status" "$socket"
+    printf '%-6s %-34s %-22s %-6s %-6s %-20s %-16s %-32s\n' \
+      "$name" "$uid" "$svc" "$port" "$mode" "$tls" "$status" "$socket"
   done < <(list_inbound_names)
 }
 
