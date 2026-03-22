@@ -10,6 +10,7 @@ DEFAULT_ENV_FILE="/etc/default/mtproxy-fork"
 DEFAULT_SERVICE_NAME="mtproxy-fork"
 DEFAULT_DATA_DIR="/var/lib/mtproxy-fork"
 INBOUNDS_DIR="${MTPROXY_INBOUNDS_DIR:-/etc/mtproxy-fork/inbounds.d}"
+INBOUND_SEQ_FILE="${MTPROXY_INBOUND_SEQ_FILE:-/var/lib/mtproxy-fork/inbound-id.seq}"
 CURRENT_INBOUND="${MTPROXY_CURRENT_INBOUND:-}"
 INBOUND_SELECTED="${MTPROXY_INBOUND_SELECTED:-0}"
 SELF_BIN="${MTPROXY_SELF_BIN:-/usr/local/bin/proxyctl}"
@@ -297,6 +298,44 @@ rand_hex16() {
     return
   fi
   od -An -N16 -tx1 /dev/urandom | tr -d ' \n'
+}
+
+rand_inbound_uid() {
+  rand_hex16 | tr '[:upper:]' '[:lower:]'
+}
+
+next_inbound_id() {
+  local seq_file="$INBOUND_SEQ_FILE"
+  local seq_dir seq cur next
+  seq_dir="$(dirname "$seq_file")"
+  install -d -m 0750 -o mtproxy -g mtproxy "$seq_dir"
+
+  if [[ -r "$seq_file" ]]; then
+    seq="$(tr -dc '0-9' < "$seq_file")"
+  else
+    seq=""
+  fi
+
+  if [[ -z "$seq" ]]; then
+    cur=1
+    while IFS= read -r existing; do
+      [[ "$existing" =~ ^[0-9]+$ ]] || continue
+      (( existing > cur )) && cur="$existing"
+    done < <(list_inbound_names)
+  else
+    cur="$seq"
+    (( cur < 1 )) && cur=1
+  fi
+
+  next=$(( cur + 1 ))
+  while inbound_exists "$next"; do
+    next=$(( next + 1 ))
+  done
+
+  printf '%s\n' "$next" > "$seq_file"
+  chown root:mtproxy "$seq_file" 2>/dev/null || true
+  chmod 0640 "$seq_file" 2>/dev/null || true
+  echo "$next"
 }
 
 rand_bootstrap_secret() {
@@ -1303,10 +1342,8 @@ cmd_inbound_create() {
     esac
   done
 
-  local id=2
-  while inbound_exists "$id"; do
-    id=$(( id + 1 ))
-  done
+  local id
+  id="$(next_inbound_id)"
 
   [[ -n "$port" ]] || die "--port is required"
   require_port "$port" || die "invalid --port value"
@@ -1345,11 +1382,12 @@ cmd_inbound_create() {
   [[ -r "$sync_tmpl" ]] || die "missing $sync_tmpl (run: proxyctl runtime update)"
   [[ -r "$timer_tmpl" ]] || die "missing $timer_tmpl (run: proxyctl runtime update)"
 
-  local envf data_dir socket state tmp_env now
+  local envf data_dir socket state tmp_env now inbound_uid
   envf="$(inbound_env_file "$id")"
   data_dir="$(inbound_data_dir "$id")"
   socket="$(inbound_socket_path "$id")"
   state="$(inbound_state_file "$id")"
+  inbound_uid="$(rand_inbound_uid)"
 
   install -d -m 0750 -o root -g mtproxy "$INBOUNDS_DIR"
   install -d -m 0750 -o mtproxy -g mtproxy "$data_dir"
@@ -1367,6 +1405,7 @@ ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
 ADMIN_TOKEN=$ADMIN_TOKEN
 SOURCE_DIR=$SOURCE_DIR
 SOURCE_REF=$SOURCE_REF
+INBOUND_UID=$inbound_uid
 ENV
   install -m 0640 -o root -g mtproxy "$tmp_env" "$envf" 2>/dev/null || install -m 0640 "$tmp_env" "$envf"
   rm -f "$tmp_env"

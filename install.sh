@@ -51,6 +51,8 @@ BOT_HTTP_ALLOW_FROM=""
 BOT_HTTP_PASSWORD=""
 BOT_HTTP_API_KEY=""
 BOT_HTTP_BASE_PATH=""
+INBOUND_UID=""
+INBOUND_SEQ_FILE="$DATA_DIR/inbound-id.seq"
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
   echo "Run as root: curl -fsSL <repo>/install.sh | sudo bash" >&2
@@ -285,6 +287,7 @@ print_logo
 
 BOOTSTRAP_SECRET="$(rand_bootstrap_secret)"
 ADMIN_TOKEN="$(rand_hex16)$(rand_hex16)"
+INBOUND_UID="$(rand_hex16)"
 PUBLIC_HOST="$(detect_public_host)"
 BOT_SSH_ALLOW_FROM="$(detect_ssh_client_ip)"
 if [[ -z "$BOT_SSH_ALLOW_FROM" ]]; then
@@ -458,6 +461,7 @@ ADMIN_TOKEN_FILE=$ADMIN_TOKEN_FILE
 ADMIN_TOKEN=$ADMIN_TOKEN
 SOURCE_DIR=$INSTALL_DIR
 SOURCE_REF=$REPO_REF
+INBOUND_UID=$INBOUND_UID
 ENV
 chown root:mtproxy "$ENV_FILE"
 chmod 0640 "$ENV_FILE"
@@ -474,6 +478,10 @@ now="$(date +%s)"
 } > "$STATE_FILE"
 chown mtproxy:mtproxy "$STATE_FILE"
 chmod 0640 "$STATE_FILE"
+
+printf '1\n' > "$INBOUND_SEQ_FILE"
+chown root:mtproxy "$INBOUND_SEQ_FILE"
+chmod 0640 "$INBOUND_SEQ_FILE"
 
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork.service" "$UNIT_FILE"
 install -m 0644 "$INSTALL_DIR/systemd/mtproxy-fork@.service" "$UNIT_TEMPLATE_FILE"

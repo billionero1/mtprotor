@@ -260,17 +260,20 @@ HTTP contract (all JSON):
   - `POST <base_path>/revoke` body: `{"secret":"<hex32>","inbound_id":1}`
   - `POST <base_path>/update` body: `{"secret":"<hex32>","label":"new_label","expires":<unix_ts>,"enabled":true,"inbound_id":1}` (any subset of editable fields)
   - `POST <base_path>/expire-disable` body: `{"inbound_id":1}` or empty
+  - For safe migrations you can add `expected_uid` in body to all mutable secret operations; request is rejected on uid mismatch.
 - Multi-inbound discovery/management:
-  - `GET <base_path>/inbounds` (list all inbounds and configs)
+  - `GET <base_path>/inbounds` (list all inbounds and configs, each inbound has stable `uid`)
   - `GET <base_path>/inbounds/<id>` (single inbound info)
+  - `GET <base_path>/inbounds/exists/<id>` (explicit existence check)
+  - `GET <base_path>/inbounds/by-uid/<uid>` (find inbound by stable uid, 404 if removed)
   - `GET <base_path>/inbounds/<id>/health`
   - `GET <base_path>/inbounds/<id>/stats`
   - `GET <base_path>/inbounds/<id>/secrets`
   - `GET <base_path>/inbounds/<id>/link`
   - `POST <base_path>/inbounds` body: `{"port":8443,"stats_port":8888,"public_host":"1.2.3.4","mode":"ee","tls_domain":"www.google.com"}`
-  - `PATCH <base_path>/inbounds/<id>` body: `{"client_port":9443,"public_host":"x.x.x.x","stealth_mode":"dd","tls_domain":"off","bootstrap_secret":"<hex32>"}` (any subset)
-  - `DELETE <base_path>/inbounds/<id>`
-  - `POST <base_path>/inbounds/<id>/issue|renew|enable|disable|revoke|update|expire-disable` (same bodies as global endpoints, without `inbound_id`)
+  - `PATCH <base_path>/inbounds/<id>` body: `{"client_port":9443,"public_host":"x.x.x.x","stealth_mode":"dd","tls_domain":"off","bootstrap_secret":"<hex32>","expected_uid":"<uid>"}` (any subset; `expected_uid` optional safety check)
+  - `DELETE <base_path>/inbounds/<id>?expected_uid=<uid>` (`expected_uid` optional safety check)
+  - `POST <base_path>/inbounds/<id>/issue|renew|enable|disable|revoke|update|expire-disable` (same bodies as global endpoints, without `inbound_id`; optional `expected_uid`)
 
 Required auth headers:
 - `Authorization: Basic base64(login:password)`

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -147,6 +148,64 @@ def read_env_file(path: str) -> Dict[str, str]:
     return cfg
 
 
+def valid_uid(uid: object) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{32}", str(uid).strip().lower()))
+
+
+def ensure_inbound_uid(inbound_id: str) -> str:
+    env_file = inbound_env_file(inbound_id)
+    cfg = read_env_file(env_file)
+    uid = cfg.get("INBOUND_UID", "").strip().lower()
+    if valid_uid(uid):
+        return uid
+
+    uid = secrets.token_hex(16)
+    if not os.path.exists(env_file):
+        return uid
+
+    try:
+        st = os.stat(env_file)
+        with open(env_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        replaced = False
+        out_lines: List[str] = []
+        for line in lines:
+            if line.startswith("INBOUND_UID="):
+                out_lines.append(f"INBOUND_UID={uid}\n")
+                replaced = True
+            else:
+                out_lines.append(line)
+        if not replaced:
+            if out_lines and not out_lines[-1].endswith("\n"):
+                out_lines[-1] = out_lines[-1] + "\n"
+            out_lines.append(f"INBOUND_UID={uid}\n")
+
+        tmp = f"{env_file}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(out_lines)
+        os.chmod(tmp, st.st_mode)
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except PermissionError:
+            pass
+        os.replace(tmp, env_file)
+    except Exception:
+        # Keep generated UID in-memory even if file write failed.
+        return uid
+    return uid
+
+
+def find_inbound_by_uid(uid: str) -> Optional[str]:
+    normalized = str(uid).strip().lower()
+    if not valid_uid(normalized):
+        return None
+    for inbound_id in list_inbound_ids():
+        if ensure_inbound_uid(inbound_id) == normalized:
+            return inbound_id
+    return None
+
+
 def systemctl_value(unit: str, key: str) -> str:
     try:
         proc = subprocess.run(
@@ -166,12 +225,14 @@ def systemctl_value(unit: str, key: str) -> str:
 def inbound_info(inbound_id: str) -> Dict[str, object]:
     env_file = inbound_env_file(inbound_id)
     cfg = read_env_file(env_file)
+    uid = ensure_inbound_uid(inbound_id)
     service = inbound_service_name(inbound_id)
     unit = f"{service}.service"
     active = systemctl_value(unit, "ActiveState")
     substate = systemctl_value(unit, "SubState")
     return {
         "id": int(inbound_id),
+        "uid": uid,
         "service": service,
         "status": f"{active}/{substate}",
         "client_port": cfg.get("CLIENT_PORT", "443"),
@@ -465,6 +526,23 @@ class Handler(BaseHTTPRequestHandler):
             return None, f"inbound not found: {normalized}"
         return normalized, None
 
+    def _check_expected_uid(self, inbound_id: str, expected_uid: Optional[object]) -> Tuple[bool, Optional[Dict[str, object]]]:
+        if expected_uid is None:
+            return True, None
+        expected = str(expected_uid).strip().lower()
+        if not valid_uid(expected):
+            return False, {"ok": False, "error": "expected_uid must be 32 hex chars"}
+        actual = ensure_inbound_uid(inbound_id)
+        if expected != actual:
+            return False, {
+                "ok": False,
+                "error": "inbound uid mismatch",
+                "inbound_id": int(inbound_id),
+                "expected_uid": expected,
+                "actual_uid": actual,
+            }
+        return True, None
+
     def _run_and_reply(self, ip: str, method: str, full_path: str, args: List[str], inbound_id: Optional[str] = None) -> None:
         rc, out = run_proxyctl(args, inbound_id=inbound_id)
         payload = parse_payload(rc, out)
@@ -565,6 +643,30 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         parts = sub.strip("/").split("/") if sub else []
+        if len(parts) == 3 and parts[0] == "inbounds" and parts[1] == "by-uid":
+            uid = parts[2].strip().lower()
+            if not valid_uid(uid):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "uid must be 32 hex chars"})
+                return
+            inbound_id = find_inbound_by_uid(uid)
+            if not inbound_id:
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "inbound not found by uid", "uid": uid})
+                return
+            self._json(HTTPStatus.OK, {"ok": True, "inbound": inbound_info(inbound_id)})
+            return
+
+        if len(parts) == 3 and parts[0] == "inbounds" and parts[1] == "exists":
+            inbound_id = normalize_inbound_id(parts[2])
+            if not inbound_id:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid inbound_id"})
+                return
+            if not inbound_exists(inbound_id):
+                self._json(HTTPStatus.OK, {"ok": True, "exists": False, "inbound_id": int(inbound_id)})
+                return
+            info = inbound_info(inbound_id)
+            self._json(HTTPStatus.OK, {"ok": True, "exists": True, "inbound_id": int(inbound_id), "uid": info["uid"]})
+            return
+
         if len(parts) >= 2 and parts[0] == "inbounds":
             inbound_id = normalize_inbound_id(parts[1])
             if not inbound_id:
@@ -667,6 +769,11 @@ class Handler(BaseHTTPRequestHandler):
             if not inbound_exists(inbound_id):
                 self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": f"inbound not found: {inbound_id}"})
                 return
+            ok_uid, uid_err = self._check_expected_uid(inbound_id, body.get("expected_uid"))
+            if not ok_uid:
+                status = HTTPStatus.CONFLICT if uid_err and uid_err.get("error") == "inbound uid mismatch" else HTTPStatus.BAD_REQUEST
+                self._json(status, uid_err or {"ok": False, "error": "expected_uid check failed"})
+                return
             action = parts[2]
             status, payload = self._handle_secret_action(action, body, inbound_id)
             logging.info("ip=%s method=POST path=%s inbound=%s status=%s", ip, full_path, inbound_id, status)
@@ -676,6 +783,11 @@ class Handler(BaseHTTPRequestHandler):
         inbound_id, err = self._resolve_inbound_id(query, body, default_id="1")
         if err:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": err})
+            return
+        ok_uid, uid_err = self._check_expected_uid(inbound_id, body.get("expected_uid"))
+        if not ok_uid:
+            status = HTTPStatus.CONFLICT if uid_err and uid_err.get("error") == "inbound uid mismatch" else HTTPStatus.BAD_REQUEST
+            self._json(status, uid_err or {"ok": False, "error": "expected_uid check failed"})
             return
 
         action = sub.lstrip("/")
@@ -710,6 +822,12 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+
+        ok_uid, uid_err = self._check_expected_uid(inbound_id, body.get("expected_uid"))
+        if not ok_uid:
+            status = HTTPStatus.CONFLICT if uid_err and uid_err.get("error") == "inbound uid mismatch" else HTTPStatus.BAD_REQUEST
+            self._json(status, uid_err or {"ok": False, "error": "expected_uid check failed"})
             return
 
         key_map = {
@@ -765,7 +883,7 @@ class Handler(BaseHTTPRequestHandler):
         if not ip:
             return
 
-        sub, full_path, _query = self._route()
+        sub, full_path, query = self._route()
         parts = sub.strip("/").split("/") if sub else []
         if len(parts) != 2 or parts[0] != "inbounds":
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
@@ -774,6 +892,14 @@ class Handler(BaseHTTPRequestHandler):
         inbound_id = normalize_inbound_id(parts[1])
         if not inbound_id:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid inbound_id"})
+            return
+        expected_uid = None
+        if "expected_uid" in query and query["expected_uid"]:
+            expected_uid = query["expected_uid"][0]
+        ok_uid, uid_err = self._check_expected_uid(inbound_id, expected_uid)
+        if not ok_uid:
+            status = HTTPStatus.CONFLICT if uid_err and uid_err.get("error") == "inbound uid mismatch" else HTTPStatus.BAD_REQUEST
+            self._json(status, uid_err or {"ok": False, "error": "expected_uid check failed"})
             return
 
         rc, out = run_proxyctl(["inbound", "remove", inbound_id, "--yes"], inbound_id=None)
