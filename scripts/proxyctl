@@ -1290,8 +1290,8 @@ pick_inbound_interactive() {
     echo "${names[0]}"
     return 0
   fi
-  echo
-  echo "Available inbound IDs:"
+  echo >&2
+  echo "Available inbound IDs:" >&2
   idx=1
   for name in "${names[@]}"; do
     local envf svc port mode tls active substate host
@@ -1305,10 +1305,10 @@ pick_inbound_interactive() {
     active="$(systemctl show -p ActiveState --value "$svc.service" 2>/dev/null || echo unknown)"
     substate="$(systemctl show -p SubState --value "$svc.service" 2>/dev/null || echo unknown)"
     printf '%d) ID %s  (%s:%s, mode=%s, tls=%s, %s/%s)\n' \
-      "$idx" "$name" "$host" "$port" "$mode" "$tls" "$active" "$substate"
+      "$idx" "$name" "$host" "$port" "$mode" "$tls" "$active" "$substate" >&2
     (( idx += 1 ))
   done
-  printf "%s" "$prompt"
+  printf "%s" "$prompt" >&2
   IFS= read -r choice || true
   if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#names[@]} )); then
     echo "${names[choice-1]}"
